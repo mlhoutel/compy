@@ -27,7 +27,6 @@ Here are some of the transformations that Compy can handle, along with their sta
 | Exception handling                            | :x: Not supported yet   |
 | Async                                         | :x: Not supported yet   |
 | Context managers                              | :x: Not supported yet   |
-| Operator overloading                          | :x: Not supported yet   |
 
 ## Getting started
 
