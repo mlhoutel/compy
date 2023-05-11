@@ -1,10 +1,14 @@
 # Compy
 
-Compy is a program that converts Python programs to one-liners. This tool is currently in development and is considered a preview, which means that it may be unstable and doesn't support all Python3 language features.
+Compy is a program that apply transformations on Python programs. This tool is currently in development and is considered a preview, which means that it may be unstable and doesn't support all Python3 language features.
 
-## Features
+## Transformations
 
-Here's a list of all the Python language features that Compy can handle, along with their status:
+Here are some of the transformations that Compy can handle, along with their status. If you have idea for new transformations, don't hesitate to add and issue. If you would like to contribute, you can fork the repository and create a pull request with your changes. Please make sure to write tests for any new features or bug fixes, and to run `cargo test` and `cargo fmt` before submitting your pull request.
+
+### :white_check_mark: No transformations
+
+### :construction: To One-liner
 
 | Feature                                       | Status                  |
 | --------------------------------------------- | ----------------------- |
@@ -25,4 +29,25 @@ Here's a list of all the Python language features that Compy can handle, along w
 | Context managers                              | :x: Not supported yet   |
 | Operator overloading                          | :x: Not supported yet   |
 
-We're continuously working on adding support for more Python features, so keep an eye on this list for updates! If you encounter any issues or have any suggestions, please feel free to open an issue on the Compy GitHub repository.
+## Getting started
+
+```sh
+git clone https://github.com/mlhoutel/compy.git && cd compy
+```
+
+### Library development
+
+```sh
+cargo test
+cargo build
+```
+
+### Demo website
+
+```sh
+cd docs
+wasm-pack build --target web --out-dir static
+npm i && npm run start
+```
+
+Once the server is running, you can open your web browser and navigate to http://localhost:8000 to see the demo website in action.
