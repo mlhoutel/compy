@@ -6,7 +6,7 @@ use rustpython_parser::ast::{
 };
 use std::collections::HashSet;
 
-use super::python::serialize_expression;
+use super::super::python::serialize_expression;
 
 const PREP_KEY: &str = "__INL__";
 const CORE_NAME: &str = "__INL__CORE";
@@ -402,8 +402,8 @@ fn inline_assign_statement(
             ],
             keywords: vec![],
         },
-        ExpressionType::List { elements } => inline_assign_list(elements, target, value),
-        ExpressionType::Tuple { elements } => inline_assign_list(elements, target, value),
+        ExpressionType::List { elements } => inline_assign_list(elements, value),
+        ExpressionType::Tuple { elements } => inline_assign_list(elements, value),
         _ => ExpressionType::NamedExpression {
             left: Box::from(to_located(clone_expression(&target.node))),
             right: Box::from(to_located(clone_expression(&value.node))),
@@ -413,7 +413,6 @@ fn inline_assign_statement(
 
 fn inline_assign_list(
     elements: &Vec<Located<ExpressionType>>,
-    target: &Located<ExpressionType>,
     value: &Located<ExpressionType>,
 ) -> ExpressionType {
     let mut elems = vec![to_located(ExpressionType::NamedExpression {
@@ -1413,8 +1412,8 @@ fn clone_parameters_adapter(
 
 #[cfg(test)]
 mod tests {
-    use crate::parse::process::oneline;
-    use crate::parse::python::{parse, serialize_inlined};
+    use crate::python::{parse, serialize_inlined};
+    use crate::transform::oneline::oneline;
 
     #[test]
     fn empty_program() {

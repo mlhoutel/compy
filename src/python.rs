@@ -334,10 +334,10 @@ fn serialize_statement(statement: &StatementType) -> String {
             }
         }
         StatementType::Try {
-            body,
-            handlers,
-            orelse,
-            finalbody,
+            body: _,
+            handlers: _,
+            orelse: _,
+            finalbody: _,
         } => todo!(),
         StatementType::ClassDef {
             name,
@@ -755,9 +755,9 @@ pub fn serialize_expression(expression: &ExpressionType) -> String {
                         )
                     }
                     StringGroup::FormattedValue {
-                        value,
-                        conversion,
-                        spec,
+                        value: _,
+                        conversion: _,
+                        spec: _,
                     } => todo!("Implement FormattedValue"),
                     StringGroup::Joined { values } => values
                         .iter()
@@ -826,7 +826,7 @@ pub fn serialize_expression(expression: &ExpressionType) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::parse::python::{parse, serialize};
+    use crate::python::{parse, serialize};
 
     #[test]
     fn integer_variable_declaration() {
