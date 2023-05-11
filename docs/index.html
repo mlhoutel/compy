@@ -42,9 +42,10 @@
         </div>
       </div>
 
-      <div>
+      <div class="relative">
         <h3>Output Code:</h3>
         <pre><code class="language-python" v-text="output"></code></pre>
+        <button @click="copy" class="absolute right-3 top-10 px-3 py-1 font-bold rounded border-solid border border-black outline-none bg-gray-100">Copy</button>
       </div>
 
       <div class="px-3 py-1">browse project sources at <a href="https://github.com/mlhoutel/compy" class="underline">https://github.com/mlhoutel/compy</a></div>
@@ -98,6 +99,10 @@
           },
           mounted() {
             this.transform();
+          },
+          copy() {
+            navigator.clipboard.writeText(this.output);
+            alert("Output copied to clipboard");
           },
         }).mount();
       });
