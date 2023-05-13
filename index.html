@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Compy demo</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.15/dist/tailwind.min.css" rel="stylesheet" />
+    <link href="https://unpkg.com/prismjs@v1.x/themes/prism.min.css" rel="stylesheet" />
+    <script src="https://unpkg.com/petite-vue" defer></script>
+    <script src="https://unpkg.com/prismjs@v1.x/components/prism-core.min.js" defer></script>
+    <script src="https://unpkg.com/prismjs@v1.x/plugins/autoloader/prism-autoloader.min.js" defer></script>
+  </head>
+  <body>
+    <div id="app" @vue:mounted="mounted" class="p-5">
+      <div class="flex flex-col sm:flex-row whitespace-nowrap pb-5 px-5">
+        <h1 class="text-2xl font-bold pr-2">Compy</h1>
+        <p class="sm:pt-3 italic">transformations on python programs</p>
+
+        <div class="flex sm:justify-end w-full h-10 mt-5 sm:mt-0">
+          <select class="mr-3 rounded border-solid border border-black font-bold h-full px-3 outline-none bg-gray-100" v-model="selected">
+            <option v-for="t in transformations" :value="t" :key="t" v-text="t">nothing</option>
+          </select>
+
+          <button @click="transform" class="font-bold rounded border-solid border border-black px-3 outline-none bg-gray-100">Transform</button>
+        </div>
+      </div>
+
+      <div>
+        <h3>Input Code:</h3>
+        <div class="relative">
+          <textarea
+            class="absolute outline-none top-0 left-0 text-transparent bg-transparent z-100 w-full h-full p-4 overflow-hidden font-mono resize-none"
+            style="caret-color: black"
+            v-model="input"
+            spellcheck="false"
+            @input="highlight"
+            @keydown.tab.prevent="tabulation"
+          >
+          </textarea>
+          <pre><code class="language-python" v-html="input"></code></pre>
+        </div>
+      </div>
+
+      <div class="relative">
+        <h3>Output Code:</h3>
+        <pre><code class="language-python" v-text="output"></code></pre>
+        <button @click="copy" class="absolute right-3 top-10 px-3 py-1 font-bold rounded border-solid border border-black outline-none bg-gray-100">Copy</button>
+      </div>
+
+      <div class="px-3 py-1">browse project sources at <a href="https://github.com/mlhoutel/compy" class="underline">https://github.com/mlhoutel/compy</a></div>
+    </div>
+
+    <script type="module">
+      import init, { transform_nothing, transform_oneline } from "./static/compy_demo.js";
+
+      init().then(() => {
+        PetiteVue.createApp({
+          _handlerDebounce: null,
+          _transformations: {
+            nothing: transform_nothing,
+            oneline: transform_oneline,
+          },
+          selected: "nothing",
+          input: "def hello(s):\n\tprint('hello' + s)\n\nhello('world')",
+          output: "",
+          get transformations() {
+            return Object.entries(this._transformations).map(([t, _]) => t);
+          },
+          transform() {
+            try {
+              this.output = this._transformations[this.selected](this.input);
+            } catch (e) {
+              alert("Invalid python program");
+            }
+
+            this.highlight();
+          },
+          highlight() {
+            clearTimeout(this._handlerDebounce);
+
+            this._handlerDebounce = setTimeout(() => {
+              PetiteVue.nextTick(() => {
+                Prism.highlightAll();
+              });
+            }, 100);
+          },
+          tabulation(event) {
+            const textarea = event.target;
+            const start = textarea.selectionStart;
+            const end = textarea.selectionEnd;
+
+            // Insert a tab character at the cursor position
+            const value = textarea.value;
+            textarea.value = value.substring(0, start) + "\t" + value.substring(end);
+
+            // Move the cursor to the end of the inserted tab
+            textarea.selectionStart = textarea.selectionEnd = start + 1;
+          },
+          mounted() {
+            this.transform();
+          },
+          copy() {
+            navigator.clipboard.writeText(this.output);
+            alert("Output copied to clipboard");
+          },
+        }).mount();
+      });
+    </script>
+  </body>
+</html>

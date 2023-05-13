@@ -1,0 +1,15 @@
+{
+  "name": "compy_demo",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "start": "npm-run-all start:serve start:watch",
+    "start:serve": "serve -l 3000",
+    "start:watch": "nodemon -e html,js"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.22",
+    "npm-run-all": "^4.1.5",
+    "serve": "^14.2.0"
+  }
+}
