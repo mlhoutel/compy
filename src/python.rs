@@ -1,7 +1,7 @@
 use rustpython_parser::{
     ast::{
-        BooleanOperator, Comparison, ComprehensionKind, ExpressionType, Number, Operator, Program,
-        StatementType, StringGroup, UnaryOperator,
+        BooleanOperator, Comparison, ComprehensionKind, ConversionFlag, ExpressionType, Located,
+        Number, Operator, Program, StatementType, StringGroup, UnaryOperator,
     },
     parser,
 };
@@ -736,11 +736,23 @@ pub fn serialize_expression(expression: &ExpressionType) -> String {
             text += &format!("*{}", &serialize_expression(&value.node))
         }
         ExpressionType::Slice { elements } => {
-            text += &elements
+            let slices = &elements
+                .iter()
+                .filter(|element| match &element.node {
+                    ExpressionType::None => false,
+                    _ => true,
+                })
+                .collect::<Vec<&Located<ExpressionType>>>();
+
+            text += &slices
                 .iter()
                 .map(|element| serialize_expression(&element.node))
                 .collect::<Vec<String>>()
-                .join(", ")
+                .join(":");
+
+            if slices.len() < 3 {
+                text += ":";
+            }
         }
         ExpressionType::String { value } => {
             fn handler(value: &StringGroup) -> String {
@@ -755,15 +767,51 @@ pub fn serialize_expression(expression: &ExpressionType) -> String {
                         )
                     }
                     StringGroup::FormattedValue {
-                        value: _,
-                        conversion: _,
-                        spec: _,
-                    } => todo!("Implement FormattedValue"),
-                    StringGroup::Joined { values } => values
-                        .iter()
-                        .map(|value| handler(value))
-                        .collect::<Vec<String>>()
-                        .join("\n"),
+                        value,
+                        conversion,
+                        spec,
+                    } => {
+                        fn formatted_handler(
+                            value: &Box<Located<ExpressionType>>,
+                            conversion: &Option<ConversionFlag>,
+                            spec: &Option<Box<StringGroup>>,
+                        ) -> String {
+                            let mut text = "".to_string();
+
+                            let conv = if let Some(conversion) = conversion {
+                                match conversion {
+                                    ConversionFlag::Str => "",
+                                    ConversionFlag::Ascii => "!a",
+                                    ConversionFlag::Repr => "!r",
+                                }
+                            } else {
+                                ""
+                            };
+
+                            text += &format!("{{{}{}}}", serialize_expression(&value.node), conv);
+
+                            if let Some(spec) = spec {
+                                text += &handler(spec)
+                            };
+
+                            text
+                        }
+
+                        format!("f'{}'", formatted_handler(value, conversion, spec))
+                    }
+                    StringGroup::Joined { values } => {
+                        let values = values
+                            .iter()
+                            .map(|value| handler(value))
+                            .collect::<Vec<String>>()
+                            .concat();
+
+                        format!(
+                            "{}'{}'",
+                            if values.contains("f'") { "f" } else { "" },
+                            values.replace("f'", "").replace("'", "")
+                        )
+                    }
                 }
             }
 
@@ -1207,6 +1255,30 @@ mod tests {
     }
 
     #[test]
+    fn formatted_string() {
+        let source = "f'{s}'";
+        assert_eq!(serialize(parse(source)), source)
+    }
+
+    #[test]
+    fn formatted_string_ascii() {
+        let source = "f'{s!a}'";
+        assert_eq!(serialize(parse(source)), source)
+    }
+
+    #[test]
+    fn formatted_string_repr() {
+        let source = "f'{s!r}'";
+        assert_eq!(serialize(parse(source)), source)
+    }
+
+    #[test]
+    fn formatted_string_multi() {
+        let source = "f'{1} then {2} then {3}'";
+        assert_eq!(serialize(parse(source)), source)
+    }
+
+    #[test]
     fn tuple_empty() {
         let source = "()";
         assert_eq!(serialize(parse(source)), source)
@@ -1227,6 +1299,30 @@ mod tests {
     #[test]
     fn list_elements() {
         let source = "[1, 2, 3, 4]";
+        assert_eq!(serialize(parse(source)), source)
+    }
+
+    #[test]
+    fn list_slice_empty_step() {
+        let source = "a[:]";
+        assert_eq!(serialize(parse(source)), source)
+    }
+
+    #[test]
+    fn list_slice_start() {
+        let source = "a[1:]";
+        assert_eq!(serialize(parse(source)), source)
+    }
+
+    #[test]
+    fn list_slice_start_step() {
+        let source = "a[1:1:]";
+        assert_eq!(serialize(parse(source)), source)
+    }
+
+    #[test]
+    fn list_slice_start_step_end() {
+        let source = "a[1:1:1]";
         assert_eq!(serialize(parse(source)), source)
     }
 }

@@ -1689,4 +1689,11 @@ mod tests {
         let expect = "[__INL__STATE := (None, 1), [__INL__SPLIT := [1, 2], a := __INL__SPLIT[0], b := __INL__SPLIT[1]]]";
         assert_eq!(serialize_inlined(oneline(parse(source))), expect)
     }
+
+    #[test]
+    fn slice_array() {
+        let source = "[:]";
+        let expect = "[__INL__STATE := (None, 1), [__INL__SPLIT := [1, 2], a := __INL__SPLIT[0], b := __INL__SPLIT[1]]]";
+        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+    }
 }
