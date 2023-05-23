@@ -689,7 +689,7 @@ pub fn serialize_expression(expression: &ExpressionType) -> String {
         ExpressionType::Comprehension { kind, generators } => {
             let (before, after) = match kind.as_ref().clone() {
                 ComprehensionKind::GeneratorExpression { element } => {
-                    (format!("{}", serialize_expression(&element.node)), "")
+                    (format!("({}", serialize_expression(&element.node)), ")")
                 }
                 ComprehensionKind::List { element } => {
                     (format!("[{}", serialize_expression(&element.node)), "]")
@@ -1226,7 +1226,7 @@ mod tests {
 
     #[test]
     fn comprehension_gen() {
-        let source = "list(i * 2 for i in l)";
+        let source = "(i * 2 for i in l)";
         assert_eq!(serialize(parse(source)), source)
     }
 

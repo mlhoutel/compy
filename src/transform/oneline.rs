@@ -1102,6 +1102,45 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                 })
                 .collect::<Vec<Located<ExpressionType>>>(),
         },
+        StatementType::Raise { exception, cause } => ExpressionType::Call {
+            function: Box::from(to_located(ExpressionType::Attribute {
+                value: Box::from(to_located(ExpressionType::Comprehension {
+                    kind: Box::from(ComprehensionKind::GeneratorExpression {
+                        element: to_located(ExpressionType::Identifier {
+                            name: "_".to_string(),
+                        }),
+                    }),
+                    generators: vec![Comprehension {
+                        location: Location::new(0, 0),
+                        target: to_located(ExpressionType::Identifier {
+                            name: "_".to_string(),
+                        }),
+                        iter: to_located(ExpressionType::Tuple { elements: vec![] }),
+                        ifs: vec![],
+                        is_async: false,
+                    }],
+                })),
+                name: "throw".to_string(),
+            })),
+            args: vec![to_located(ExpressionType::Call {
+                function: Box::from(to_located(match &exception {
+                    Some(exception) => clone_expression(&exception.node),
+                    None => ExpressionType::Identifier {
+                        name: "RuntimeError".to_string(),
+                    },
+                })),
+                args: vec![to_located(match &cause {
+                    Some(cause) => clone_expression(&cause.node),
+                    None => ExpressionType::String {
+                        value: StringGroup::Constant {
+                            value: "No active exception to reraise".to_string(),
+                        },
+                    },
+                })],
+                keywords: vec![],
+            })],
+            keywords: vec![],
+        },
         _ => todo!(),
     }
 }
@@ -1742,6 +1781,20 @@ mod tests {
     fn slice_array() {
         let source = "s[:]";
         let expect = "[__INL__STATE := (None, 1), s[:]]";
+        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+    }
+
+    #[test]
+    fn raise_exception() {
+        let source = "raise";
+        let expect = "[__INL__STATE := (None, 1), (_ for _ in ()).throw(RuntimeError('No active exception to reraise'))]";
+        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+    }
+
+    #[test]
+    fn raise_exception_message() {
+        let source = "raise Exception('error')";
+        let expect = "[__INL__STATE := (None, 1), (_ for _ in ()).throw(Exception('error')('No active exception to reraise'))]";
         assert_eq!(serialize_inlined(oneline(parse(source))), expect)
     }
 }
