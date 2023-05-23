@@ -4,7 +4,7 @@ use rustpython_parser::ast::{
     ImportSymbol, Keyword, Located, Location, Number, Operator, Parameter, Parameters, Program,
     StatementType, StringGroup, UnaryOperator, Varargs,
 };
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use super::super::python::serialize_expression;
 
@@ -18,6 +18,7 @@ const IMPORT_KEY: &str = "__INL__IMPORT_";
 const VARS_NAME: &str = "vars";
 const HASATTR_NAME: &str = "hasattr";
 const GLOBALS_NAME: &str = "globals";
+const UPDATE_NAME: &str = "update";
 const BUILTINS_NAME: &str = "__builtins__";
 const SETATTR_NAME: &str = "setattr";
 const SETITEM_NAME: &str = "__setitem__";
@@ -331,12 +332,20 @@ fn prepare_body(
     level: u32,
     from: usize,
 ) -> Vec<Located<ExpressionType>> {
-    let mut local_statements = vec![];
+    let mut local_statements = VecDeque::new();
+    let mut globals: HashSet<String> = HashSet::new();
 
     for i in from..body.len() {
         let statement = &body[i];
 
-        local_statements.push(to_located(to_expression(&statement.node, level + 1)));
+        // Extract global to the outer border of the body
+        if let StatementType::Global { names } = &statement.node {
+            globals.extend(names.clone());
+            continue;
+        }
+
+        // Convert current expression
+        local_statements.push_back(to_located(to_expression(&statement.node, level + 1)));
 
         // Remove each statements after a return, break or continue is found
         let split_flow = match &statement.node {
@@ -360,14 +369,73 @@ fn prepare_body(
                 orelse: Box::from(to_located(ExpressionType::None)),
             };
 
-            local_statements.push(to_located(check_state));
+            local_statements.push_back(to_located(check_state));
 
             break;
         }
     }
 
-    local_statements
+    // move globals declaration to begining and update at the end
+    for global in globals {
+        local_statements.push_front(global_declaration(global.to_string()));
+        local_statements.push_back(global_update(global.to_string()));
+    }
+
+    local_statements.into_iter().collect()
 }
+
+// x := globals()["x"]
+fn global_declaration(global: String) -> Located<ExpressionType> {
+    to_located(ExpressionType::NamedExpression {
+        left: Box::from(to_located(ExpressionType::Identifier {
+            name: global.to_string(),
+        })),
+        right: Box::from(to_located(ExpressionType::Subscript {
+            a: Box::from(to_located(ExpressionType::Call {
+                function: Box::from(to_located(ExpressionType::Identifier {
+                    name: GLOBALS_NAME.to_string(),
+                })),
+                args: vec![],
+                keywords: vec![],
+            })),
+            b: Box::from(to_located(ExpressionType::String {
+                value: StringGroup::Constant {
+                    value: global.to_string(),
+                },
+            })),
+        })),
+    })
+}
+
+// globals().update({'x': x})
+fn global_update(global: String) -> Located<ExpressionType> {
+    to_located(ExpressionType::Call {
+        function: Box::from(to_located(ExpressionType::Attribute {
+            value: Box::from(to_located(ExpressionType::Call {
+                function: Box::from(to_located(ExpressionType::Identifier {
+                    name: GLOBALS_NAME.to_string(),
+                })),
+                args: vec![],
+                keywords: vec![],
+            })),
+            name: UPDATE_NAME.to_string(),
+        })),
+        args: vec![to_located(ExpressionType::Dict {
+            elements: vec![(
+                Some(to_located(ExpressionType::String {
+                    value: StringGroup::Constant {
+                        value: global.to_string(),
+                    },
+                })),
+                to_located(ExpressionType::Identifier {
+                    name: global.to_string(),
+                }),
+            )],
+        })],
+        keywords: vec![],
+    })
+}
+
 fn inline_assign_statement(
     target: &Located<ExpressionType>,
     value: &Located<ExpressionType>,
@@ -1034,35 +1102,6 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                 })
                 .collect::<Vec<Located<ExpressionType>>>(),
         },
-        StatementType::Global { names } => ExpressionType::List {
-            // TODO:
-            // for global to be updated, we need to update their value at the end of the scope
-            // as: globals().update({'gid': gid }).
-            elements: names
-                .iter()
-                .map(|name| {
-                    to_located(ExpressionType::NamedExpression {
-                        left: Box::from(to_located(ExpressionType::Identifier {
-                            name: name.to_string(),
-                        })),
-                        right: Box::from(to_located(ExpressionType::Subscript {
-                            a: Box::from(to_located(ExpressionType::Call {
-                                function: Box::from(to_located(ExpressionType::Identifier {
-                                    name: GLOBALS_NAME.to_string(),
-                                })),
-                                args: vec![],
-                                keywords: vec![],
-                            })),
-                            b: Box::from(to_located(ExpressionType::String {
-                                value: StringGroup::Constant {
-                                    value: name.to_string(),
-                                },
-                            })),
-                        })),
-                    })
-                })
-                .collect::<Vec<Located<ExpressionType>>>(),
-        },
         _ => todo!(),
     }
 }
@@ -1644,7 +1683,16 @@ mod tests {
     #[test]
     fn global_statement() {
         let source = "global a";
-        let expect = "[__INL__STATE := (None, 1), [a := globals()['a']]]";
+        let expect =
+            "[__INL__STATE := (None, 1), a := globals()['a'], globals().update({ 'a': a })]";
+        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+    }
+
+    #[test]
+    fn global_statement_update() {
+        let source = "a = 1\ndef test():\n\tglobal a\n\ta = 2";
+        let expect =
+            "[__INL__STATE := (None, 1), a := 1, test := (lambda: [__INL__STATE := (None, 1), a := globals()['a'], a := 2, globals().update({ 'a': a }), __INL__STATE[0]][-1])]";
         assert_eq!(serialize_inlined(oneline(parse(source))), expect)
     }
 

@@ -22,11 +22,11 @@ Here are some of the transformations that Compy can handle, along with their sta
 | Decorators                                    | :white_check_mark: Done |
 | Built-in functions and modules                | :white_check_mark: Done |
 | Generators and iterators                      | :white_check_mark: Done |
-| Type hints and static typing                  | :construction: In work  |
-| Globals                                       | :construction: In work  |
-| Exception handling                            | :x: Not supported yet   |
+| Globals                                       | :white_check_mark: Done |
+| Exception handling                            | :construction: In work  |
+| Context managers                              | :construction: In work  |
 | Async                                         | :x: Not supported yet   |
-| Context managers                              | :x: Not supported yet   |
+| Type hints and static typing                  | :x: Not supported yet   |
 
 ## Getting started
 
