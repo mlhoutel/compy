@@ -19,9 +19,16 @@ const VARS_NAME: &str = "vars";
 const HASATTR_NAME: &str = "hasattr";
 const GLOBALS_NAME: &str = "globals";
 const UPDATE_NAME: &str = "update";
+const EMPTY_NAME: &str = "_";
+const THROW_NAME: &str = "throw";
+const SYSTEM_NAME: &str = "sys";
+const EXCEPTHOOK_NAME: &str = "excepthook";
 const BUILTINS_NAME: &str = "__builtins__";
 const SETATTR_NAME: &str = "setattr";
 const SETITEM_NAME: &str = "__setitem__";
+const TEMP_EXCEPTHOOK: &str = "__INL__EXCEPTHOOK";
+const EXCEPTION_DEF_TYPE: &str = "RuntimeError";
+const EXCEPTION_DEF_MSG: &str = "No active exception to reraise";
 
 /*
 * Manual state handling:
@@ -319,6 +326,34 @@ fn extract_imports(body: &Vec<Located<StatementType>>) -> Vec<Located<StatementT
                 returns: _,
             } => {
                 imports.append(&mut extract_imports(body));
+            }
+            StatementType::Try {
+                body,
+                handlers,
+                orelse,
+                finalbody,
+            } => {
+                // We need to import the sys library for using the excepthook
+                imports.push(to_located(StatementType::Import {
+                    names: vec![ImportSymbol {
+                        symbol: SYSTEM_NAME.to_string(),
+                        alias: None,
+                    }],
+                }));
+
+                imports.append(&mut extract_imports(body));
+
+                for handler in handlers {
+                    imports.append(&mut extract_imports(&handler.body));
+                }
+
+                if let Some(orelse) = &orelse {
+                    imports.append(&mut extract_imports(orelse));
+                }
+
+                if let Some(finalbody) = &finalbody {
+                    imports.append(&mut extract_imports(finalbody));
+                }
             }
             _ => {}
         }
@@ -1107,33 +1142,33 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                 value: Box::from(to_located(ExpressionType::Comprehension {
                     kind: Box::from(ComprehensionKind::GeneratorExpression {
                         element: to_located(ExpressionType::Identifier {
-                            name: "_".to_string(),
+                            name: EMPTY_NAME.to_string(),
                         }),
                     }),
                     generators: vec![Comprehension {
                         location: Location::new(0, 0),
                         target: to_located(ExpressionType::Identifier {
-                            name: "_".to_string(),
+                            name: EMPTY_NAME.to_string(),
                         }),
                         iter: to_located(ExpressionType::Tuple { elements: vec![] }),
                         ifs: vec![],
                         is_async: false,
                     }],
                 })),
-                name: "throw".to_string(),
+                name: THROW_NAME.to_string(),
             })),
             args: vec![to_located(ExpressionType::Call {
                 function: Box::from(to_located(match &exception {
                     Some(exception) => clone_expression(&exception.node),
                     None => ExpressionType::Identifier {
-                        name: "RuntimeError".to_string(),
+                        name: EXCEPTION_DEF_TYPE.to_string(),
                     },
                 })),
                 args: vec![to_located(match &cause {
                     Some(cause) => clone_expression(&cause.node),
                     None => ExpressionType::String {
                         value: StringGroup::Constant {
-                            value: "No active exception to reraise".to_string(),
+                            value: EXCEPTION_DEF_MSG.to_string(),
                         },
                     },
                 })],
@@ -1141,6 +1176,64 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
             })],
             keywords: vec![],
         },
+        StatementType::Try {
+            body,
+            handlers,
+            orelse,
+            finalbody,
+        } => {
+            // sys := __INL__IMPORT_sys
+            // tmp = sys.excepthook
+            // rest = (lambda: [])
+            // sys.excepthook = (lambda type, val, tbk: [print(val), rest()])
+            // rest()
+            let mut elements = vec![];
+
+            elements.push(to_located(ExpressionType::NamedExpression {
+                left: Box::from(to_located(ExpressionType::Identifier {
+                    name: SYSTEM_NAME.to_string(),
+                })),
+                right: Box::from(to_located(ExpressionType::Identifier {
+                    name: format!("{}{}", IMPORT_KEY.to_string(), SYSTEM_NAME.to_string()),
+                })),
+            }));
+
+            elements.push(to_located(ExpressionType::NamedExpression {
+                left: Box::from(to_located(ExpressionType::Identifier {
+                    name: TEMP_EXCEPTHOOK.to_string(),
+                })),
+                right: Box::from(to_located(ExpressionType::Attribute {
+                    value: Box::from(to_located(ExpressionType::Identifier {
+                        name: SYSTEM_NAME.to_string(),
+                    })),
+                    name: EXCEPTHOOK_NAME.to_string(),
+                })),
+            }));
+
+            // TODO
+
+            elements.push(to_located(ExpressionType::Call {
+                function: Box::from(to_located(ExpressionType::Identifier {
+                    name: SETATTR_NAME.to_string(),
+                })),
+                args: vec![
+                    to_located(ExpressionType::Identifier {
+                        name: SYSTEM_NAME.to_string(),
+                    }),
+                    to_located(ExpressionType::String {
+                        value: StringGroup::Constant {
+                            value: EXCEPTHOOK_NAME.to_string(),
+                        },
+                    }),
+                    to_located(ExpressionType::Identifier {
+                        name: TEMP_EXCEPTHOOK.to_string(),
+                    }),
+                ],
+                keywords: vec![],
+            }));
+
+            ExpressionType::List { elements }
+        }
         _ => todo!(),
     }
 }
@@ -1794,6 +1887,13 @@ mod tests {
     #[test]
     fn raise_exception_message() {
         let source = "raise Exception('error')";
+        let expect = "[__INL__STATE := (None, 1), (_ for _ in ()).throw(Exception('error')('No active exception to reraise'))]";
+        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+    }
+
+    #[test]
+    fn try_except() {
+        let source = "try:\n\tprint('test')\nexcept:\n\tprint('error')";
         let expect = "[__INL__STATE := (None, 1), (_ for _ in ()).throw(Exception('error')('No active exception to reraise'))]";
         assert_eq!(serialize_inlined(oneline(parse(source))), expect)
     }
