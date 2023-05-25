@@ -716,7 +716,7 @@ pub fn serialize_expression(expression: &ExpressionType) -> String {
                         let mut comp_text = "".to_string();
 
                         if comp.is_async {
-                            comp_text += " async"
+                            comp_text += " async";
                         }
 
                         comp_text += &format!(
@@ -724,6 +724,18 @@ pub fn serialize_expression(expression: &ExpressionType) -> String {
                             serialize_expression(&comp.target.node),
                             serialize_expression(&comp.iter.node)
                         );
+
+                        if comp.ifs.len() > 0 {
+                            comp_text += &format!(
+                                " if {}",
+                                &comp
+                                    .ifs
+                                    .iter()
+                                    .map(|i| serialize_expression(&i.node))
+                                    .collect::<Vec<String>>()
+                                    .join(" ")
+                            );
+                        }
 
                         comp_text
                     })
@@ -1209,6 +1221,12 @@ mod tests {
     #[test]
     fn comprehension_list() {
         let source = "[i * 2 for i in l]";
+        assert_eq!(serialize(parse(source)), source)
+    }
+
+    #[test]
+    fn comprehension_list_if() {
+        let source = "[i * 2 for i in l if i % 2 == 0]";
         assert_eq!(serialize(parse(source)), source)
     }
 

@@ -23,6 +23,7 @@ Here are some of the transformations that Compy can handle, along with their sta
 | Built-in functions and modules                | :white_check_mark: Done |
 | Generators and iterators                      | :white_check_mark: Done |
 | Globals                                       | :white_check_mark: Done |
+| Delete                                        | :white_check_mark: Done |
 | Exception handling                            | :construction: In work  |
 | Context managers                              | :construction: In work  |
 | Async                                         | :x: Not supported yet   |

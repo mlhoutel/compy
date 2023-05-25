@@ -1,3 +1,4 @@
+use crate::python::parse;
 use num_bigint::BigInt;
 use rustpython_parser::ast::{
     BooleanOperator, Comparison, Comprehension, ComprehensionKind, ConversionFlag, ExpressionType,
@@ -19,13 +20,16 @@ const VARS_NAME: &str = "vars";
 const HASATTR_NAME: &str = "hasattr";
 const GLOBALS_NAME: &str = "globals";
 const UPDATE_NAME: &str = "update";
+const SLICE_NAME: &str = "slice";
 const EMPTY_NAME: &str = "_";
 const THROW_NAME: &str = "throw";
 const SYSTEM_NAME: &str = "sys";
 const EXCEPTHOOK_NAME: &str = "excepthook";
 const BUILTINS_NAME: &str = "__builtins__";
 const SETATTR_NAME: &str = "setattr";
+const DELATTR_NAME: &str = "delattr";
 const SETITEM_NAME: &str = "__setitem__";
+const DELITEM_NAME: &str = "__delitem__";
 const TEMP_EXCEPTHOOK: &str = "__INL__EXCEPTHOOK";
 const EXCEPTION_DEF_TYPE: &str = "RuntimeError";
 const EXCEPTION_DEF_MSG: &str = "No active exception to reraise";
@@ -1234,6 +1238,58 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
 
             ExpressionType::List { elements }
         }
+        StatementType::Delete { targets } => ExpressionType::List {
+            elements: targets
+                .iter()
+                .map(|target| match &target.node {
+                    ExpressionType::Subscript { a, b } => {
+                        // a.__delitem__(b)
+                        to_located(ExpressionType::Call {
+                            function: Box::from(to_located(ExpressionType::Attribute {
+                                value: Box::from(to_located(clone_expression(&a.node))),
+                                name: DELITEM_NAME.to_string(),
+                            })),
+                            args: vec![match &b.node {
+                                ExpressionType::Slice { elements } => {
+                                    to_located(ExpressionType::Call {
+                                        function: Box::from(to_located(
+                                            ExpressionType::Identifier {
+                                                name: SLICE_NAME.to_string(),
+                                            },
+                                        )),
+                                        args: elements.iter().map(|e| to_located(clone_expression(&e.node))).collect::<Vec<Located<ExpressionType>>>(),
+                                        keywords: vec![],
+                                    })
+                                }
+                                _ => to_located(clone_expression(&b.node)),
+                            }],
+                            keywords: vec![],
+                        })
+                    }
+                    ExpressionType::Attribute { value, name } => {
+                        // delattr(value, "name")
+                        to_located(ExpressionType::Call {
+                            function: Box::from(to_located(ExpressionType::Identifier {
+                                name: DELATTR_NAME.to_string(),
+                            })),
+                            args: vec![
+                                to_located(clone_expression(&value.node)),
+                                to_located(ExpressionType::String {
+                                    value: StringGroup::Constant {
+                                        value: name.to_string(),
+                                    },
+                                }),
+                            ],
+                            keywords: vec![],
+                        })
+                    }
+                    _ => {
+                        let program = parse(&format!("[__INL__frame := inspect.currentframe(), [__INL__frame.f_locals.pop(__INL__name) for __INL__name in [__INL__name for __INL__name, __INL__value in __INL__frame.f_locals.items() if __INL__value is {}]], ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(__INL__frame), ctypes.c_int(1))]", serialize_expression(&target.node)));
+                        to_located(to_expression(&program.statements[0].node, level + 1))
+                    }
+                })
+                .collect::<Vec<Located<ExpressionType>>>(),
+        },
         _ => todo!(),
     }
 }
@@ -1895,6 +1951,27 @@ mod tests {
     fn try_except() {
         let source = "try:\n\tprint('test')\nexcept:\n\tprint('error')";
         let expect = "[__INL__STATE := (None, 1), (_ for _ in ()).throw(Exception('error')('No active exception to reraise'))]";
+        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+    }
+
+    #[test]
+    fn del_variable() {
+        let source = "del a";
+        let expect = "[__INL__STATE := (None, 1), (_ for _ in ()).throw(Exception('error')('No active exception to reraise'))]";
+        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+    }
+
+    #[test]
+    fn del_item() {
+        let source = "del l[0]";
+        let expect = "[__INL__STATE := (None, 1), [l.__delitem__(0)]]";
+        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+    }
+
+    #[test]
+    fn del_slice() {
+        let source = "del l[1:2]";
+        let expect = "[__INL__STATE := (None, 1), [l.__delitem__(slice(1, 2, None))]]";
         assert_eq!(serialize_inlined(oneline(parse(source))), expect)
     }
 }
