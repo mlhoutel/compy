@@ -24,6 +24,8 @@ const SLICE_NAME: &str = "slice";
 const EMPTY_NAME: &str = "_";
 const THROW_NAME: &str = "throw";
 const SYSTEM_NAME: &str = "sys";
+const CTYPE_NAME: &str = "ctypes";
+const INSPECT_NAME: &str = "inspect";
 const EXCEPTHOOK_NAME: &str = "excepthook";
 const BUILTINS_NAME: &str = "__builtins__";
 const SETATTR_NAME: &str = "setattr";
@@ -87,6 +89,8 @@ pub fn oneline(ast: Program) -> Program {
                             Some(alias) => format!("{} as {}{}", name.symbol, IMPORT_KEY, alias),
                             None => format!("{} as {}{}", name.symbol, IMPORT_KEY, name.symbol),
                         })
+                        .collect::<HashSet<String>>()
+                        .into_iter()
                         .collect::<Vec<String>>()
                         .join(", ")
                 );
@@ -357,6 +361,28 @@ fn extract_imports(body: &Vec<Located<StatementType>>) -> Vec<Located<StatementT
 
                 if let Some(finalbody) = &finalbody {
                     imports.append(&mut extract_imports(finalbody));
+                }
+            }
+            StatementType::Delete { targets } => {
+                for target in targets {
+                    match &target.node {
+                        ExpressionType::Subscript { a: _, b: _ } => {}
+                        _ => {
+                            imports.push(to_located(StatementType::Import {
+                                names: vec![ImportSymbol {
+                                    symbol: INSPECT_NAME.to_string(),
+                                    alias: None,
+                                }],
+                            }));
+
+                            imports.push(to_located(StatementType::Import {
+                                names: vec![ImportSymbol {
+                                    symbol: CTYPE_NAME.to_string(),
+                                    alias: None,
+                                }],
+                            }));
+                        }
+                    }
                 }
             }
             _ => {}
@@ -1181,10 +1207,10 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
             keywords: vec![],
         },
         StatementType::Try {
-            body,
-            handlers,
-            orelse,
-            finalbody,
+            body: _,
+            handlers: _,
+            orelse: _,
+            finalbody: _,
         } => {
             // sys := __INL__IMPORT_sys
             // tmp = sys.excepthook
@@ -1284,7 +1310,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                         })
                     }
                     _ => {
-                        let program = parse(&format!("[__INL__frame := inspect.currentframe(), [__INL__frame.f_locals.pop(__INL__name) for __INL__name in [__INL__name for __INL__name, __INL__value in __INL__frame.f_locals.items() if __INL__value is {}]], ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(__INL__frame), ctypes.c_int(1))]", serialize_expression(&target.node)));
+                        let program = parse(&format!("[__INL__frame := __INL__IMPORT_inspect.currentframe(), [__INL__frame.f_locals.pop(__INL__name) for __INL__name in [__INL__name for __INL__name, __INL__value in __INL__frame.f_locals.items() if __INL__value is {}]], __INL__IMPORT_ctypes.pythonapi.PyFrame_LocalsToFast(__INL__IMPORT_ctypes.py_object(__INL__frame), __INL__IMPORT_ctypes.c_int(1))]", serialize_expression(&target.node)));
                         to_located(to_expression(&program.statements[0].node, level + 1))
                     }
                 })
@@ -1950,14 +1976,14 @@ mod tests {
     #[test]
     fn try_except() {
         let source = "try:\n\tprint('test')\nexcept:\n\tprint('error')";
-        let expect = "[__INL__STATE := (None, 1), (_ for _ in ()).throw(Exception('error')('No active exception to reraise'))]";
+        let expect = "import sys as __INL__IMPORT_sys;[__INL__STATE := (None, 1), [sys := __INL__IMPORT_sys, __INL__EXCEPTHOOK := sys.excepthook, setattr(sys, 'excepthook', __INL__EXCEPTHOOK)]]";
         assert_eq!(serialize_inlined(oneline(parse(source))), expect)
     }
 
     #[test]
     fn del_variable() {
         let source = "del a";
-        let expect = "[__INL__STATE := (None, 1), (_ for _ in ()).throw(Exception('error')('No active exception to reraise'))]";
+        let expect = "import inspect as __INL__IMPORT_inspect;import ctypes as __INL__IMPORT_ctypes;[__INL__STATE := (None, 1), [[__INL__frame := __INL__IMPORT_inspect.currentframe(), [__INL__frame.f_locals.pop(__INL__name) for __INL__name in [__INL__name for (__INL__name, __INL__value) in __INL__frame.f_locals.items() if __INL__value is a]], __INL__IMPORT_ctypes.pythonapi.PyFrame_LocalsToFast(__INL__IMPORT_ctypes.py_object(__INL__frame), __INL__IMPORT_ctypes.c_int(1))]]]";
         assert_eq!(serialize_inlined(oneline(parse(source))), expect)
     }
 
