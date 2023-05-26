@@ -73,6 +73,7 @@
             this.inputSnippet = ace.edit("inputSnippet");
             this.inputSnippet.setTheme("ace/theme/monokai");
             this.inputSnippet.session.setMode("ace/mode/python");
+            this.inputSnippet.session.setUseWrapMode(true);
 
             this.inputSnippet.session.on("change", () => {
               this.input = this.inputSnippet.getValue();
@@ -81,6 +82,7 @@
             this.outputSnippet = ace.edit("outputSnippet");
             this.outputSnippet.setTheme("ace/theme/monokai");
             this.outputSnippet.session.setMode("ace/mode/python");
+            this.outputSnippet.session.setUseWrapMode(true);
             this.outputSnippet.setReadOnly(true);
           },
           copy() {
