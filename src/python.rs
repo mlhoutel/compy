@@ -812,17 +812,32 @@ pub fn serialize_expression(expression: &ExpressionType) -> String {
                         format!("f'{}'", formatted_handler(value, conversion, spec))
                     }
                     StringGroup::Joined { values } => {
+                        let mut formatted = false;
+
                         let values = values
                             .iter()
-                            .map(|value| handler(value))
+                            .map(|value| {
+                                let mut str = handler(value);
+
+                                if str.starts_with("f'") {
+                                    formatted = true;
+                                    str = str[2..].to_string();
+                                } else if str.starts_with("'") {
+                                    formatted = true;
+                                    str = str[1..].to_string();
+                                }
+
+                                if str.ends_with("'") {
+                                    formatted = true;
+                                    str = str[..str.len() - 1].to_string();
+                                }
+
+                                str
+                            })
                             .collect::<Vec<String>>()
                             .concat();
 
-                        format!(
-                            "{}'{}'",
-                            if values.contains("f'") { "f" } else { "" },
-                            values.replace("f'", "").replace("'", "")
-                        )
+                        format!("{}'''{}'''", if formatted { "f" } else { "" }, values)
                     }
                 }
             }
@@ -1292,7 +1307,13 @@ mod tests {
 
     #[test]
     fn formatted_string_multi() {
-        let source = "f'{1} then {2} then {3}'";
+        let source = "f'''{1} then {2} then {3}'''";
+        assert_eq!(serialize(parse(source)), source)
+    }
+
+    #[test]
+    fn formatted_string_multiline_underscript() {
+        let source = "f'''\\n{a['b']}\\n'''";
         assert_eq!(serialize(parse(source)), source)
     }
 
