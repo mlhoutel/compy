@@ -413,23 +413,26 @@ fn prepare_body(
         local_statements.push_back(to_located(to_expression(&statement.node, level + 1)));
 
         // Remove each statements after a return, break or continue is found
-        let split_flow = match &statement.node {
+        // We can give the indent of the target (if: 0, while: 1, for: 1, otherwise nothing)
+        let split_flow: u32 = match &statement.node {
             StatementType::Break => break,
             StatementType::Continue => break,
             StatementType::Return { .. } => break,
             StatementType::Pass => break,
-            StatementType::If { .. } => true,
-            StatementType::While { .. } => true,
-            StatementType::For { .. } => true,
-            _ => false,
+            StatementType::If { .. } => 1,
+            StatementType::While { .. } => 2,
+            StatementType::For { .. } => 2,
+            _ => 0,
         };
 
         // Add a check on the state after each for/while loop and if statements
-        if split_flow {
+        if split_flow > 0 {
+            let flow_target = level + split_flow - 1; // to account for split_flow that start at 1
+            
             let check_state = ExpressionType::IfExpression {
                 test: Box::from(to_located(check_state_target(level))),
                 body: Box::from(to_located(ExpressionType::List {
-                    elements: prepare_body(body, level, i + 1),
+                    elements: prepare_body(body, flow_target, i + 1),
                 })),
                 orelse: Box::from(to_located(ExpressionType::None)),
             };
@@ -779,14 +782,15 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                 located
             });
 
-            // compute the condition for each lambda call
+            // `__INL__COND := ...` => Compute the condition for each lambda call
 
-            // execute the code only if the condition is met
-
-            // replace each augmented assign with a explicit approach
-            // and target local copy variables
-
-            // return local copied variables for global update
+            // `[...] if __INL__STATE[1] > 1 else None` => check for continuation after every point where a
+            // statement that alter the flow of the program can act. If no return (etc.) was done before, it
+            // will play the rest of the program in the [...], otherwise 
+            
+            // `... if __INL__COND else (__INL__STATE, ...)` => check in a while if the condition for continuing
+            // was met, if so, it will play the current while body. Otherwise, it will return the state and all
+            // locally copied variable that were potentially modified for update them in the upper scope
 
             let mut body_composite = prepare_body(body, level, 0);
 
@@ -817,7 +821,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
             ]
             .concat();
 
-            body_composite.push(to_located(ExpressionType::Call {
+            let recursive_call = to_located(ExpressionType::Call {
                 function: Box::from(to_located(ExpressionType::Identifier {
                     name: CORE_NAME.to_string(),
                 })),
@@ -826,7 +830,9 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                     .map(|arg| to_located(ExpressionType::Identifier { name: arg.clone() }))
                     .collect::<Vec<Located<ExpressionType>>>(),
                 keywords: vec![],
-            }));
+            });
+
+            body_composite.push(recursive_call);
 
             let lambda_body = Box::from(to_located(ExpressionType::Subscript {
                 a: Box::from(to_located(clone_expression_adapter(
@@ -873,11 +879,22 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                 }));
             }
 
+
+            // Before executing the body of the current iteration, we need to check that
+            // no changes have been made to the program flow in the last iteration body.
+            let flow_local_test = to_located(ExpressionType::BoolOp { 
+                op: BooleanOperator::And, 
+                values: vec![
+                    local_test,
+                    to_located(check_state_target(level))
+                ]
+            });
+
             core_body.push(to_located(ExpressionType::NamedExpression {
                 left: Box::from(to_located(ExpressionType::Identifier {
                     name: COND_NAME.to_string(),
                 })),
-                right: Box::from(local_test),
+                right: Box::from(flow_local_test),
             }));
 
             let mut return_state = vec![to_located(ExpressionType::Identifier {
@@ -1812,21 +1829,28 @@ mod tests {
     #[test]
     fn while_loop() {
         let source = "while True:\n\tprint('test')";
-        let expect = "[__INL__STATE := (None, 1), [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, print: __INL__CORE(__INL__CORE, __INL__STATE, print))((lambda __INL__CORE, __INL__STATE, print: [__INL__print := print, __INL__COND := True, [__INL__print('test'), __INL__CORE(__INL__CORE, __INL__STATE, __INL__print)][-1] if __INL__COND else (__INL__STATE, print)][-1]), __INL__STATE, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], print := __INL__TEMP[1]], [] if __INL__STATE[1] > 0 else None]";
+        let expect = "[__INL__STATE := (None, 1), [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, print: __INL__CORE(__INL__CORE, __INL__STATE, print))((lambda __INL__CORE, __INL__STATE, print: [__INL__print := print, __INL__COND := True and __INL__STATE[1] > 1, [__INL__print('test'), __INL__CORE(__INL__CORE, __INL__STATE, __INL__print)][-1] if __INL__COND else (__INL__STATE, print)][-1]), __INL__STATE, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], print := __INL__TEMP[1]], [] if __INL__STATE[1] > 0 else None]";
         assert_eq!(serialize_inlined(oneline(parse(source))), expect)
     }
 
     #[test]
     fn while_loop_args() {
         let source = "a = 1\nwhile a < 5:\n\ta += 1\n\tprint(a)\nprint(a)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 5, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2]], [print(a)] if __INL__STATE[1] > 0 else None]";
+        let expect = "[__INL__STATE := (None, 1), a := 1, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 5 and __INL__STATE[1] > 1, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2]], [print(a)] if __INL__STATE[1] > 0 else None]";
         assert_eq!(serialize_inlined(oneline(parse(source))), expect)
     }
 
     #[test]
     fn while_loop_args_else() {
         let source = "a = 1\nwhile a < 5:\n\ta += 1\n\tprint(a)\nelse:\n\tprint(a)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 5, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2], [print(a)]], [] if __INL__STATE[1] > 0 else None]";
+        let expect = "[__INL__STATE := (None, 1), a := 1, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 5 and __INL__STATE[1] > 1, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2], [print(a)]], [] if __INL__STATE[1] > 0 else None]";
+        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+    }
+
+    #[test]
+    fn while_loop_flow_alteration() {
+        let source = "while True:\n\tif True:\n\t\tbreak";
+        let expect = "[__INL__STATE := (None, 1), [__INL__TEMP := (lambda __INL__CORE, __INL__STATE: __INL__CORE(__INL__CORE, __INL__STATE))((lambda __INL__CORE, __INL__STATE: [__INL__COND := True and __INL__STATE[1] > 1, [[__INL__STATE := (None, 2)] if True else None, [] if __INL__STATE[1] > 1 else None, __INL__CORE(__INL__CORE, __INL__STATE)][-1] if __INL__COND else (__INL__STATE, None)][-1]), __INL__STATE), __INL__STATE := __INL__TEMP[0]], [] if __INL__STATE[1] > 0 else None]";
         assert_eq!(serialize_inlined(oneline(parse(source))), expect)
     }
 
@@ -1861,28 +1885,28 @@ mod tests {
     #[test]
     fn optional_variable() {
         let source = "a = 1\nb = 2\nwhile a < 5:\n\ta += 1\n\tb -= 1\nprint(a)\nprint(b)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, b := 2, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, b: __INL__CORE(__INL__CORE, __INL__STATE, a, b))((lambda __INL__CORE, __INL__STATE, a, b: [__INL__a := a, __INL__b := b, __INL__COND := __INL__a < 5, [__INL__a := __INL__a + 1, __INL__b := __INL__b - 1, __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__b)][-1] if __INL__COND else (__INL__STATE, a, b)][-1]), __INL__STATE, a, b if 'b' in vars() else __builtins__.b if hasattr(__builtins__, 'b') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], b := __INL__TEMP[2]], [print(a), print(b)] if __INL__STATE[1] > 0 else None]";
+        let expect = "[__INL__STATE := (None, 1), a := 1, b := 2, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, b: __INL__CORE(__INL__CORE, __INL__STATE, a, b))((lambda __INL__CORE, __INL__STATE, a, b: [__INL__a := a, __INL__b := b, __INL__COND := __INL__a < 5 and __INL__STATE[1] > 1, [__INL__a := __INL__a + 1, __INL__b := __INL__b - 1, __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__b)][-1] if __INL__COND else (__INL__STATE, a, b)][-1]), __INL__STATE, a, b if 'b' in vars() else __builtins__.b if hasattr(__builtins__, 'b') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], b := __INL__TEMP[2]], [print(a), print(b)] if __INL__STATE[1] > 0 else None]";
         assert_eq!(serialize_inlined(oneline(parse(source))), expect)
     }
 
     #[test]
     fn optional_function() {
         let source = "a = 1\nwhile a < 5:\n\ta += 1\n\tprint(a)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 5, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2]], [] if __INL__STATE[1] > 0 else None]";
+        let expect = "[__INL__STATE := (None, 1), a := 1, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 5 and __INL__STATE[1] > 1, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2]], [] if __INL__STATE[1] > 0 else None]";
         assert_eq!(serialize_inlined(oneline(parse(source))), expect)
     }
 
     #[test]
     fn optional_function_returned() {
         let source = "a = 1\nwhile a < 5:\n\ta += 1\n\tprint(a)\nprint(a)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 5, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2]], [print(a)] if __INL__STATE[1] > 0 else None]";
+        let expect = "[__INL__STATE := (None, 1), a := 1, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 5 and __INL__STATE[1] > 1, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2]], [print(a)] if __INL__STATE[1] > 0 else None]";
         assert_eq!(serialize_inlined(oneline(parse(source))), expect)
     }
 
     #[test]
     fn optional_function_scoped() {
         let source = "def main():\n\ta = 1\n\twhile a < 10:\n\t\ta += 1\n\t\tprint(a)\nmain()";
-        let expect = "[__INL__STATE := (None, 1), main := (lambda: [__INL__STATE := (None, 1), a := 1, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 10, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2]], [] if __INL__STATE[1] > 0 else None, __INL__STATE[0]][-1]), main()]";
+        let expect = "[__INL__STATE := (None, 1), main := (lambda: [__INL__STATE := (None, 1), a := 1, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 10 and __INL__STATE[1] > 1, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2]], [] if __INL__STATE[1] > 0 else None, __INL__STATE[0]][-1]), main()]";
         assert_eq!(serialize_inlined(oneline(parse(source))), expect)
     }
 
