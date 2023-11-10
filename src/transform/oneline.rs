@@ -1808,8 +1808,8 @@ mod tests {
     #[test]
     fn function_declaration_recursive() {
         let source =
-            "def fib(i):\n\tif i == 0:\n\t\treturn 1\n\telse:\n\t\treturn fib(i-1) + f(i-2)";
-        let expect = "[__INL__STATE := (None, 1), fib := (lambda i: [__INL__STATE := (None, 1), [__INL__STATE := (1, 0)] if i == 0 else [__INL__STATE := (fib(i - 1) + f(i - 2), 0)], [] if __INL__STATE[1] > 0 else None, __INL__STATE[0]][-1])]";
+            "def fib(i):\n\tif i <= 1:\n\t\treturn i\n\telse:\n\t\treturn fib(i-1) + f(i-2)";
+        let expect = "[__INL__STATE := (None, 1), fib := (lambda i: [__INL__STATE := (None, 1), [__INL__STATE := (i, 0)] if i <= 1 else [__INL__STATE := (fib(i - 1) + f(i - 2), 0)], [] if __INL__STATE[1] > 0 else None, __INL__STATE[0]][-1])]";
         assert_eq!(serialize_inlined(oneline(parse(source))), expect)
     }
 
