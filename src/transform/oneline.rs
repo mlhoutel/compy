@@ -1690,346 +1690,578 @@ fn clone_parameters_adapter(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, Arc};
+
     use crate::python::{parse, serialize_inlined};
     use crate::transform::oneline::oneline;
+    use rustpython_vm as rvm;
+    use rvm::{extend_class, py_class};
+
+    fn program_outputs(source: &str) -> String {
+
+        rvm::Interpreter::without_stdlib(Default::default()).enter(|vm| {
+            let scope = vm.new_scope_with_builtins();
+            let buffer: Arc<Mutex<String>> = Arc::new(Mutex::new("".to_string()));
+
+            let ctx = &vm.ctx;
+            let cls = rvm::PyRef::leak(py_class!(
+                ctx,
+                "Tstdout",
+                vm.ctx.types.object_type.to_owned(),
+                {}
+            ));
+            
+            let closure_buffer = buffer.clone();
+
+            let write_method = vm.new_method(   
+            "write",
+            cls,
+                move |_self: rvm::PyObjectRef, data: rvm::builtins::PyStrRef, _vm: &rvm::VirtualMachine| -> rvm::PyResult<()> {
+                    let mut buffer = closure_buffer.lock().unwrap();
+                    *buffer += data.as_str();
+                    // println!("test: {}", data.as_str());
+                    Result::Ok(())
+                },
+            );
+
+            let flush_method = vm.new_method(
+                "flush", 
+                cls, 
+                |_self: rvm::PyObjectRef| {}
+            );
+
+            extend_class!(ctx, cls, {
+                "write" => write_method,
+                "flush" => flush_method,
+            });
+
+            let stdout = ctx.new_base_object(cls.to_owned(), None);
+            vm.sys_module.set_attr("stdout", stdout, vm).unwrap();
+            
+            match vm
+                .compile(source, rvm::compiler::Mode::Exec, "<embedded>".to_owned())
+                .map_err(|err| vm.new_syntax_error(&err, Some(source)))
+                .and_then(|code_obj| vm.run_code_obj(code_obj, scope.clone())) {
+                    Ok(_output) => {            
+                        buffer.lock().unwrap().to_string()
+                    },
+                    Err(err) => {
+                        vm.print_exception(err); 
+                        buffer.lock().unwrap().to_string()
+                    },
+                }               
+        })
+        
+    }
+
+    fn valid_output(source: &str) {
+        let serialized = serialize_inlined(oneline(parse(source)));
+
+        let expected = program_outputs(source);
+        let oneliner = program_outputs(serialized.as_str());
+
+        assert_eq!(expected, oneliner, "Error: programs stdout are not matching:\n[base]: {expected}\n[oneliner]: {oneliner}\n\nThe oneliner source code is the following one:\n\n{serialized}")
+    }
 
     #[test]
     fn empty_program() {
-        let source = "";
-        let expect = "[__INL__STATE := (None, 1)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn variable_declaration() {
-        let source = "a = 1";
-        let expect = "[__INL__STATE := (None, 1), a := 1]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn variable_declaration_multi() {
-        let source = "a = 1\nb = a";
-        let expect = "[__INL__STATE := (None, 1), a := 1, b := a]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+b = a
+print(b)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn variable_bin_operation() {
-        let source = "a = 1\nb = a + 2";
-        let expect = "[__INL__STATE := (None, 1), a := 1, b := a + 2]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+b = a + 2
+print(b)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn function_call() {
-        let source = "a = 1\nb = a + 2\nc = a + b\nprint(c)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, b := a + 2, c := a + b, print(c)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+b = a + 2
+c = a + b
+print(c)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn type_list() {
-        let source = "a = [1, 2, 3]";
-        let expect = "[__INL__STATE := (None, 1), a := [1, 2, 3]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = [1, 2, 3]
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn type_tuple() {
-        let source = "a = (1, 2, 3)";
-        let expect = "[__INL__STATE := (None, 1), a := (1, 2, 3)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = (1, 2, 3)
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn type_set() {
-        let source = "a = { 1, 2, 3 }";
-        let expect = "[__INL__STATE := (None, 1), a := { 1, 2, 3 }]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = { 1, 2, 3 }
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn type_dict() {
-        let source = "a = { 'a': 1, 'b': 2, 'c': 3 }";
-        let expect = "[__INL__STATE := (None, 1), a := { 'a': 1, 'b': 2, 'c': 3 }]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = { 'a': 1, 'b': 2, 'c': 3 }
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn type_string() {
-        let source = "a = 'abc'";
-        let expect = "[__INL__STATE := (None, 1), a := 'abc']";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 'abc'
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn if_statement() {
-        let source = "if a:\n\tprint(1)";
-        let expect = "[__INL__STATE := (None, 1), [print(1)] if a else None, [] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+if True:
+    print(1)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn if_else_statement() {
-        let source = "if a:\n\tprint(1)\nelse:\n\tprint(2)";
-        let expect = "[__INL__STATE := (None, 1), [print(1)] if a else [print(2)], [] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+if False:
+    print(1)
+else:
+    print(2)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn list_comprehension() {
-        let source = "a = [i for i in range(10)]";
-        let expect = "[__INL__STATE := (None, 1), a := [i for i in range(10)]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = [i for i in range(10)]
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn lambda_function() {
-        let source = "a = (lambda x: x + 1)(1)";
-        let expect = "[__INL__STATE := (None, 1), a := (lambda x: x + 1)(1)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = (lambda x: x + 1)(1)
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn function_declaration() {
-        let source = "a = 1\ndef sprint(v):\n\tprint(v)\nsprint(a)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, sprint := (lambda v: [__INL__STATE := (None, 1), print(v), __INL__STATE[0]][-1]), sprint(a)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+def sprint(v):
+    print(v)
+sprint(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn function_declaration_decorated() {
-        let source = "a = 1\n@property\ndef sprint(v):\n\tprint(v)\nsprint(a)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, sprint := property((lambda v: [__INL__STATE := (None, 1), print(v), __INL__STATE[0]][-1])), sprint(a)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+@property
+def sprint(v):
+    print(v)
+sprint(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn function_declaration_recursive() {
-        let source =
-            "def fib(i):\n\tif i <= 1:\n\t\treturn i\n\telse:\n\t\treturn fib(i-1) + f(i-2)";
-        let expect = "[__INL__STATE := (None, 1), fib := (lambda i: [__INL__STATE := (None, 1), [__INL__STATE := (i, 0)] if i <= 1 else [__INL__STATE := (fib(i - 1) + f(i - 2), 0)], [] if __INL__STATE[1] > 0 else None, __INL__STATE[0]][-1])]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source =r#"
+def fib(i):
+    if i <= 1:
+        return i
+    else:
+        return fib(i-1) + fib(i-2)
+print(fib(10))
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn function_declaration_parameter() {
-        let source = "a = 1\ndef sprint(v):\n\tprint(v)\nsprint(a)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, sprint := (lambda v: [__INL__STATE := (None, 1), print(v), __INL__STATE[0]][-1]), sprint(a)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+def sprint(v):
+    print(v)
+sprint(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn for_loop() {
-        let source = "for i in range(10):\n\tprint(i)";
-        let expect = "[__INL__STATE := (None, 1), [[__INL__i := i, print(__INL__i)] for i in range(10)], [] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+for i in range(10):
+    print(i)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn for_loop_else() {
-        let source = "for i in range(10):\n\tprint(i)\nelse:\n\tprint('none')";
-        let expect = "[__INL__STATE := (None, 1), [[[__INL__i := i, print(__INL__i)] for i in range(10)], [print('none')]], [] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+for i in range(10):
+    print(i)
+else:
+    print('none')
+"#;
+        valid_output(source);
+    }
+
+    #[test]
+    fn for_loop_return() {
+        let source = r#"
+for i in range(10):
+    if i == 2:
+        return
+    print(i)
+"#;
+        valid_output(source);
+
+    }
+    
+    #[test]
+    fn for_loop_break() {
+        let source = r#"
+for i in range(10):
+    if i == 2:
+        break
+    print(i)
+"#;
+        valid_output(source);
+    }
+    
+    #[test]
+    fn for_loop_continue() {
+        let source = r#"
+for i in range(10):
+    if i == 2:
+        continue
+    print(i)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn while_loop() {
-        let source = "while True:\n\tprint('test')";
-        let expect = "[__INL__STATE := (None, 1), [__INL__STATE := (None, 2), __INL__TEMP := (lambda __INL__CORE, __INL__STATE, print: __INL__CORE(__INL__CORE, __INL__STATE, print))((lambda __INL__CORE, __INL__STATE, print: [__INL__print := print, __INL__COND := True and __INL__STATE[1] > 1, [__INL__print('test'), __INL__CORE(__INL__CORE, __INL__STATE, __INL__print)][-1] if __INL__COND else (__INL__STATE, print)][-1]), __INL__STATE, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], print := __INL__TEMP[1]], [] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+i = 0
+while i < 5:
+    i += 1
+    print('test')
+"#;
+        valid_output(source);
     }
 
     #[test]
-    fn while_loop_args() {
-        let source = "a = 1\nwhile a < 5:\n\ta += 1\n\tprint(a)\nprint(a)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, [__INL__STATE := (None, 2), __INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 5 and __INL__STATE[1] > 1, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2]], [print(a)] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
-    }
-
-    #[test]
-    fn while_loop_args_else() {
-        let source = "a = 1\nwhile a < 5:\n\ta += 1\n\tprint(a)\nelse:\n\tprint(a)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, [__INL__STATE := (None, 2), __INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 5 and __INL__STATE[1] > 1, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2], [print(a)]], [] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+    fn while_loop_else() {
+        let source = r#"
+a = 1
+while a < 5:
+    a += 1
+    print(a)
+else:
+    print(a + 10)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn while_loop_flow_alteration() {
-        let source = "while True:\n\tif True:\n\t\tbreak";
-        let expect = "[__INL__STATE := (None, 1), [__INL__STATE := (None, 2), __INL__TEMP := (lambda __INL__CORE, __INL__STATE: __INL__CORE(__INL__CORE, __INL__STATE))((lambda __INL__CORE, __INL__STATE: [__INL__COND := True and __INL__STATE[1] > 1, [[__INL__STATE := (None, 2)] if True else None, [] if __INL__STATE[1] > 1 else None, __INL__CORE(__INL__CORE, __INL__STATE)][-1] if __INL__COND else (__INL__STATE, None)][-1]), __INL__STATE), __INL__STATE := __INL__TEMP[0]], [] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+while True:
+    if True:
+        break
+print("ended")
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn class_declaration() {
-        let source = "class A():\n\tm = 'bar'\n\tdef foo(self):\n\t\treturn self.m";
-        let expect = "[__INL__STATE := (None, 1), A := type('A', (object,), { 'm': 'bar', 'foo': (lambda self: [__INL__STATE := (None, 1), __INL__STATE := (self.m, 0), __INL__STATE[0]][-1]) })]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+class A():
+    m = 'bar'
+    def foo(self):
+        return self.m
+a = A()
+print(a.foo())
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn remove_after_return() {
-        let source = "a = 1\nreturn\nb = 1";
-        let expect = "[__INL__STATE := (None, 1), a := 1, __INL__STATE := (None, 0)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+print(1)
+return
+print(2)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn split_after_return() {
-        let source = "if a == 1:\n\treturn\nb = 1";
-        let expect = "[__INL__STATE := (None, 1), [__INL__STATE := (None, 0)] if a == 1 else None, [b := 1] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+print(1)
+if True == 1:
+    return
+print(2)
+b = 1
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn function_return() {
-        let source = "def a():\n\tif True:\n\t\treturn 1\n\treturn 2\nprint(a())";
-        let expect = "[__INL__STATE := (None, 1), a := (lambda: [__INL__STATE := (None, 1), [__INL__STATE := (1, 0)] if True else None, [__INL__STATE := (2, 0)] if __INL__STATE[1] > 0 else None, __INL__STATE[0]][-1]), print(a())]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+def a():
+    if True:
+        return 1
+    return 2
+print(a())
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn optional_variable() {
-        let source = "a = 1\nb = 2\nwhile a < 5:\n\ta += 1\n\tb -= 1\nprint(a)\nprint(b)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, b := 2, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, b: __INL__CORE(__INL__CORE, __INL__STATE, a, b))((lambda __INL__CORE, __INL__STATE, a, b: [__INL__a := a, __INL__b := b, __INL__COND := __INL__a < 5 and __INL__STATE[1] > 1, [__INL__a := __INL__a + 1, __INL__b := __INL__b - 1, __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__b)][-1] if __INL__COND else (__INL__STATE, a, b)][-1]), __INL__STATE, a, b if 'b' in vars() else __builtins__.b if hasattr(__builtins__, 'b') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], b := __INL__TEMP[2]], [print(a), print(b)] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+b = 2
+while a < 5:
+    a += 1
+    b -= 1
+print(a)
+print(b)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn optional_function() {
-        let source = "a = 1\nwhile a < 5:\n\ta += 1\n\tprint(a)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 5 and __INL__STATE[1] > 1, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2]], [] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
-    }
-
-    #[test]
-    fn optional_function_returned() {
-        let source = "a = 1\nwhile a < 5:\n\ta += 1\n\tprint(a)\nprint(a)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 5 and __INL__STATE[1] > 1, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2]], [print(a)] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+while a < 5:
+    a += 1
+    print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn optional_function_scoped() {
-        let source = "def main():\n\ta = 1\n\twhile a < 10:\n\t\ta += 1\n\t\tprint(a)\nmain()";
-        let expect = "[__INL__STATE := (None, 1), main := (lambda: [__INL__STATE := (None, 1), a := 1, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 10 and __INL__STATE[1] > 1, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2]], [] if __INL__STATE[1] > 0 else None, __INL__STATE[0]][-1]), main()]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+def main():
+    a = 1
+    while a < 10:
+        a += 1
+        print(a)
+main()
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn import_statement() {
-        let source = "import math\nprint(math.pi)";
-        let expect =
-            "import math as __INL__IMPORT_math;[__INL__STATE := (None, 1), [math := __INL__IMPORT_math], print(math.pi)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+import math
+print(math.pi)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn global_statement() {
-        let source = "global a";
-        let expect =
-            "[__INL__STATE := (None, 1), a := globals()['a'], globals().update({ 'a': a })]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+global a = 10
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn global_statement_update() {
-        let source = "a = 1\ndef test():\n\tglobal a\n\ta = 2";
-        let expect =
-            "[__INL__STATE := (None, 1), a := 1, test := (lambda: [__INL__STATE := (None, 1), a := globals()['a'], a := 2, globals().update({ 'a': a }), __INL__STATE[0]][-1])]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
-    }
-
-    #[test]
-    fn assign_statement() {
-        let source = "a = 1";
-        let expect = "[__INL__STATE := (None, 1), a := 1]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+def test():
+    global a
+    a = 2
+test()
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn assign_statement_attribute() {
-        let source = "a.attr = 1";
-        let expect = "[__INL__STATE := (None, 1), setattr(a, 'attr', 1)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+class A():
+    pass
+a = A()
+a.attr = 1
+print(a.attr)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn assign_statement_subscript() {
-        let source = "a[1] = 1";
-        let expect = "[__INL__STATE := (None, 1), a.__setitem__(1, 1)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = [0, 1, 2]
+a[1] = 1
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn assign_statement_multi() {
-        let source = "a = b = 1";
-        let expect = "[__INL__STATE := (None, 1), [a := 1, b := 1]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = b = 1
+print(a)
+print(b)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn assign_statement_tuple() {
-        let source = "(a, b) = (1, 2)";
-        let expect = "[__INL__STATE := (None, 1), [__INL__SPLIT := (1, 2), a := __INL__SPLIT[0], b := __INL__SPLIT[1]]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+(a, b) = (1, 2)
+print(a)
+print(b)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn assign_statement_list() {
-        let source = "[a, b] = [1, 2]";
-        let expect = "[__INL__STATE := (None, 1), [__INL__SPLIT := [1, 2], a := __INL__SPLIT[0], b := __INL__SPLIT[1]]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+[a, b] = [1, 2]
+print(a)
+print(b)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn slice_array() {
-        let source = "s[:]";
-        let expect = "[__INL__STATE := (None, 1), s[:]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+s = [0,1,2,3]
+print(s[:])
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn raise_exception() {
-        let source = "raise";
-        let expect = "[__INL__STATE := (None, 1), (_ for _ in ()).throw(RuntimeError('No active exception to reraise'))]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+raise
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn raise_exception_message() {
-        let source = "raise Exception('error')";
-        let expect = "[__INL__STATE := (None, 1), (_ for _ in ()).throw(Exception('error')('No active exception to reraise'))]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+raise Exception('error')
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn try_except() {
-        let source = "try:\n\tprint('test')\nexcept:\n\tprint('error')";
-        let expect = "import sys as __INL__IMPORT_sys;[__INL__STATE := (None, 1), [sys := __INL__IMPORT_sys, __INL__EXCEPTHOOK := sys.excepthook, setattr(sys, 'excepthook', __INL__EXCEPTHOOK)]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+try:
+    print('test')
+except:
+    print('error')
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn del_variable() {
-        let source = "del a";
-        let expect = "import inspect as __INL__IMPORT_inspect;import ctypes as __INL__IMPORT_ctypes;[__INL__STATE := (None, 1), [[__INL__frame := __INL__IMPORT_inspect.currentframe(), [__INL__frame.f_locals.pop(__INL__name) for __INL__name in [__INL__name for (__INL__name, __INL__value) in __INL__frame.f_locals.items() if __INL__value is a]], __INL__IMPORT_ctypes.pythonapi.PyFrame_LocalsToFast(__INL__IMPORT_ctypes.py_object(__INL__frame), __INL__IMPORT_ctypes.c_int(1))]]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+del a
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn del_item() {
-        let source = "del l[0]";
-        let expect = "[__INL__STATE := (None, 1), [l.__delitem__(0)]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+l = [0,1,2]
+del l[0]
+print(l)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn del_slice() {
-        let source = "del l[1:2]";
-        let expect = "[__INL__STATE := (None, 1), [l.__delitem__(slice(1, 2, None))]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+l = [0,1,2]
+del l[1:2]
+print(l)
+"#;
+        valid_output(source);
     }
+
+
 }
