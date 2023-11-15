@@ -1,10 +1,10 @@
-use crate::python::parse;
+use crate::{python::parse, serialize_statement};
 use num_bigint::BigInt;
-use rustpython_parser::ast::{
+use rustpython_parser::{ast::{
     BooleanOperator, Comparison, Comprehension, ComprehensionKind, ConversionFlag, ExpressionType,
     ImportSymbol, Keyword, Located, Location, Number, Operator, Parameter, Parameters, Program,
     StatementType, StringGroup, UnaryOperator, Varargs,
-};
+}, parser};
 use std::collections::{HashSet, VecDeque};
 
 use super::super::python::serialize_expression;
@@ -16,6 +16,9 @@ const TEMP_NAME: &str = "__INL__TEMP";
 const SPLIT_NAME: &str = "__INL__SPLIT";
 const STATE_NAME: &str = "__INL__STATE";
 const IMPORT_KEY: &str = "__INL__IMPORT_";
+const ITER_NAME: &str = "__INL__ITER";
+const ITER_CURSOR: &str = "__INL__ITCUR";
+const STOP_COND: &str = "__INL__STOP";
 const VARS_NAME: &str = "vars";
 const HASATTR_NAME: &str = "hasattr";
 const GLOBALS_NAME: &str = "globals";
@@ -24,6 +27,8 @@ const SLICE_NAME: &str = "slice";
 const EMPTY_NAME: &str = "_";
 const THROW_NAME: &str = "throw";
 const SYSTEM_NAME: &str = "sys";
+const TOITER_NAME: &str = "iter";
+const NEXT_NAME: &str = "next";
 const CTYPE_NAME: &str = "ctypes";
 const INSPECT_NAME: &str = "inspect";
 const EXCEPTHOOK_NAME: &str = "excepthook";
@@ -188,7 +193,7 @@ fn check_state_target(target: u32) -> ExpressionType {
                 },
             }),
         ],
-        ops: vec![Comparison::Greater],
+        ops: vec![Comparison::GreaterOrEqual],
     }
 }
 
@@ -699,97 +704,138 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
             lambda_var
         }
         StatementType::For {
-            is_async,
+            is_async: _,
             target,
             iter,
             body,
             orelse,
         } => {
-            // escaping fields are handled in the list comprehension
-            let mut variants = HashSet::new();
+            // Transform the python loop to a While statement before inlining it
+            // 
+            // for (i in range(10)):
+            //          <=>
+            // it = iter(range(10))
+            // cur = next(it, "STOP") 
+            // while cur != "STOP":
+            //      i = cur
+            //      cur = next(it, "STOP") 
 
-            // Find variants in loop target
-            clone_expression_adapter(&target.node, &mut |located| {
-                if let ExpressionType::Identifier { name } = &located {
-                    variants.insert(name.to_string());
-                };
+            // `it = iter(range(10))`
+            let iter_assign = ExpressionType::NamedExpression { 
+                left: Box::from(to_located(ExpressionType::Identifier { 
+                    name: ITER_NAME.to_string() 
+                })), 
+                right: Box::from(to_located(ExpressionType::Call { 
+                    function: Box::from(to_located(ExpressionType::Identifier { 
+                        name: TOITER_NAME.to_string() 
+                    })),
+                    args: vec![to_located(clone_expression(&iter.node))], 
+                    keywords: vec![] 
+                })),
+            };
 
-                located
-            });
+            // `cur = next(it, "STOP")`
+            let cur_assign = ExpressionType::NamedExpression { 
+                left: Box::from(to_located(ExpressionType::Identifier { 
+                    name: ITER_CURSOR.to_string(),
+                })), 
+                right: Box::from(to_located(ExpressionType::Call { 
+                    function: Box::from(to_located(ExpressionType::Identifier {
+                            name: NEXT_NAME.to_string() 
+                    })), 
+                    args: vec![
+                        to_located(ExpressionType::Identifier { 
+                            name: ITER_NAME.to_string() 
+                        }),
+                        to_located(ExpressionType::String { value:
+                            StringGroup::Constant { 
+                                value: STOP_COND.to_string()  
+                            } 
+                        })
+                    ], 
+                    keywords: vec![], 
+                })),
+            };
 
-            // Add redeclare each in the local scope
-            let mut local_body = Vec::from_iter(variants.clone())
-                .iter()
-                .map(|variant| {
-                    to_located(ExpressionType::NamedExpression {
-                        left: Box::from(to_located(ExpressionType::Identifier {
-                            name: to_internal(variant.to_string()),
-                        })),
-                        right: Box::from(to_located(ExpressionType::Identifier {
-                            name: variant.to_string(),
-                        })),
-                    })
+            let mut new_body = vec![];
+
+            // To account for case where there is tuple unpacking, we temporarly
+            // assign the iterator value to a cursor variable, then unpack and 
+            // assign it at the beggining of the while body.
+            // `i = cur`
+            new_body.push(to_located(StatementType::Assign { 
+                targets: vec![to_located(clone_expression(&target.node))], 
+                value: to_located(ExpressionType::Identifier { 
+                    name: ITER_CURSOR.to_string(),
+                }) 
+            }));
+            
+            // `cur = next(it, "STOP")`
+            new_body.push(to_located(StatementType::Assign { 
+                targets: vec![
+                    to_located(ExpressionType::Identifier { 
+                        name: ITER_CURSOR.to_string(),
+                    }) 
+                ], 
+                value: to_located(ExpressionType::Call { 
+                    function: Box::from(to_located(ExpressionType::Identifier {
+                            name: NEXT_NAME.to_string() 
+                    })), 
+                    args: vec![
+                        to_located(ExpressionType::Identifier { 
+                            name: ITER_NAME.to_string() 
+                        }),
+                        to_located(ExpressionType::String { value:
+                            StringGroup::Constant { 
+                                value: STOP_COND.to_string()  
+                            } 
+                        })
+                    ], 
+                    keywords: vec![], 
                 })
-                .collect::<Vec<Located<ExpressionType>>>();
+            }));
 
-            let prepared_body = prepare_body(body, level, 0);
-
-            for lin in prepared_body.iter() {
-                let mut local_lin = to_located(clone_expression(&lin.node));
-
-                local_lin.node = clone_expression_adapter(&local_lin.node, &mut |located| {
-                    if let ExpressionType::Identifier { name } = &located {
-                        if variants.contains(&name.to_string()) {
-                            return ExpressionType::Identifier {
-                                name: to_internal(name.to_string()),
-                            };
-                        }
-                    };
-
-                    located
-                });
-
-                local_body.push(local_lin);
+            // inject the body of the for loop into the while loop
+            for b in body {
+                new_body.append(&mut parser::parse_statement(&serialize_statement(&b.node)).ok().unwrap());
             }
-            let lambda_body = to_located(ExpressionType::List {
-                elements: local_body,
-            });
 
-            let kind = ComprehensionKind::List {
-                element: lambda_body,
-            };
+            let mut new_orelse = vec![];
 
-            let generators = vec![Comprehension {
-                location: Location::new(0, 0),
-                target: to_located(clone_expression(&target.node)),
-                iter: to_located(clone_expression(&iter.node)),
-                ifs: vec![],
-                is_async: is_async.clone(),
-            }];
-
-            let comprehension = ExpressionType::Comprehension {
-                kind: Box::from(kind),
-                generators: generators,
-            };
-
+            // inject the or else body of the for loop into the or else while loop
             if let Some(orelse) = orelse {
-                let orelse_body = to_located(ExpressionType::List {
-                    elements: orelse
-                        .iter()
-                        .map(|lin| to_located(to_expression(&lin.node, level + 1)))
-                        .collect::<Vec<Located<ExpressionType>>>(),
-                });
-
-                ExpressionType::List {
-                    elements: vec![to_located(comprehension), orelse_body],
+                for o in orelse {
+                    new_orelse.append(&mut parser::parse_statement(&serialize_statement(&o.node)).ok().unwrap());
                 }
-            } else {
-                comprehension
+            }
+
+            // `while cur != "STOP":`
+            let while_statement = StatementType::While { 
+                test: to_located(ExpressionType::Compare { 
+                    vals: vec![
+                        to_located(ExpressionType::Identifier { name: ITER_CURSOR.to_string() }),
+                        to_located(ExpressionType::String { value: StringGroup::Constant { value: STOP_COND.to_string() } })
+                    ], 
+                    ops: vec![Comparison::NotEqual] 
+                }), 
+                body: new_body,
+                orelse: match orelse {
+                    Some(_) => Some(new_orelse),
+                    None => None,
+                }
+            };
+
+            ExpressionType::List { 
+                elements: vec![
+                    to_located(iter_assign), 
+                    to_located(cur_assign),
+                    to_located(to_expression(&while_statement, level))
+                ]
             }
         }
         StatementType::While { test, body, orelse } => {
+            
             // Find variants in test, add each as a param and replace with local name
-
             let mut local_test = to_located(clone_expression(&test.node));
             let mut variants = HashSet::new();
             let local_level = level + 1;
