@@ -36,20 +36,21 @@ const TEMP_EXCEPTHOOK: &str = "__INL__EXCEPTHOOK";
 const EXCEPTION_DEF_TYPE: &str = "RuntimeError";
 const EXCEPTION_DEF_MSG: &str = "No active exception to reraise";
 
-/*
-* Manual state handling:
-*
-* we assume that all code in a branch after a return, pass, or continue statement can be eliminated.
-* we also assume that if a return statement happens in a conditional statement, all remaining code will execute in the else block.
-*
-* as such, we can handle the execution flow in the state variable
-* [0] Return value buffer
-* [1] Target indentation
-*
-* We can then define this state in each function and add checks in conditionals to iterate towards the target indentation.
-* (i): this may add extra code and checks, which could potentially affect program performance, but it's the only effective solution I've come up with.
-*/
 
+/// Transform a python program to a one-liner python program
+///
+/// > **Manual state handling:**
+/// >
+/// > we assume that all code in a branch after a return, pass, or continue statement can be eliminated.
+/// > we also assume that if a return statement happens in a conditional statement, all remaining code will execute in the else block.
+/// >
+/// > as such, we can handle the execution flow in the state variable
+/// >  * [0] Return value buffer
+/// >  * [1] Target indentation
+/// >
+/// > We can then define this state in each function and add checks in conditionals to iterate towards the target indentation.
+/// > 
+/// > (i): this may add extra code and checks, which could potentially affect program performance.
 pub fn oneline(ast: Program) -> Program {
     let mut local = Program { statements: vec![] };
 
@@ -127,14 +128,19 @@ pub fn oneline(ast: Program) -> Program {
     return local;
 }
 
+/// Serialize variable name with compliant format
 fn to_internal(s: String) -> String {
     format!("{}{}", PREP_KEY, s)
 }
 
+/// Reset the state with base values (None, 1) at the beggining of a new body
 fn reset_state() -> ExpressionType {
     update_state(ExpressionType::None, 1)
 }
 
+/// Update the current state with the value and new target indentation, for instance:
+/// 
+/// `__INL__STATE := (None, 1)`
 fn update_state(value: ExpressionType, target: u32) -> ExpressionType {
     ExpressionType::NamedExpression {
         left: Box::from(to_located(ExpressionType::Identifier {
@@ -153,6 +159,9 @@ fn update_state(value: ExpressionType, target: u32) -> ExpressionType {
     }
 }
 
+/// Extract the current indentation from the python state, for instance:
+/// 
+/// `__INL__STATE[1]`
 fn state_target() -> ExpressionType {
     ExpressionType::Subscript {
         a: Box::from(to_located(ExpressionType::Identifier {
@@ -166,6 +175,9 @@ fn state_target() -> ExpressionType {
     }
 }
 
+/// Compare python state with current target, for instance:
+/// 
+/// `__INL__STATE[1] > 1`
 fn check_state_target(target: u32) -> ExpressionType {
     ExpressionType::Compare {
         vals: vec![
@@ -180,6 +192,9 @@ fn check_state_target(target: u32) -> ExpressionType {
     }
 }
 
+/// Explicitely infer an argument source, for instance:
+/// 
+/// `print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None)`
 fn optional_variable(identifier: String) -> ExpressionType {
     ExpressionType::IfExpression {
         test: Box::from(to_located(ExpressionType::Compare {
@@ -230,16 +245,17 @@ fn optional_variable(identifier: String) -> ExpressionType {
     }
 }
 
+/// Convert an expression to a statement
 fn to_statement(expression: ExpressionType) -> StatementType {
     return StatementType::Expression {
         expression: to_located(expression),
     };
 }
 
-// We move each import at the top of the program, they will stay as Statements
-// and will be inlined with ";" separators. To keep the potential scoping of the import,
-// we will prepend the moved global import with an identifier, and re-declare their
-// true identifier with the prepended version at the time they are truly imported.
+/// Move each import at the top of the program, they will stay as Statements
+/// and will be inlined with ";" separators. To keep the potential scoping of the import,
+/// we will prepend the moved global import with an identifier, and re-declare their
+/// true identifier with the prepended version at the time they are truly imported.
 fn extract_imports(body: &Vec<Located<StatementType>>) -> Vec<Located<StatementType>> {
     let mut imports = vec![];
     for statement in body {
@@ -392,6 +408,9 @@ fn extract_imports(body: &Vec<Located<StatementType>>) -> Vec<Located<StatementT
     imports
 }
 
+/// Prepare a body with a given level and from a certain point
+/// for flow management (handle program branchings and flow 
+/// statement like return, break, pass, continue)
 fn prepare_body(
     body: &Vec<Located<StatementType>>,
     level: u32,
@@ -504,6 +523,7 @@ fn global_update(global: String) -> Located<ExpressionType> {
     })
 }
 
+/// Convert an assign to an one-liner compatible one
 fn inline_assign_statement(
     target: &Located<ExpressionType>,
     value: &Located<ExpressionType>,
@@ -547,6 +567,7 @@ fn inline_assign_statement(
     }
 }
 
+/// Convert an assign list to a list of assignments
 fn inline_assign_list(
     elements: &Vec<Located<ExpressionType>>,
     value: &Located<ExpressionType>,
@@ -577,6 +598,8 @@ fn inline_assign_list(
     ExpressionType::List { elements: elems }
 }
 
+/// Convert a statement to a one-liner expression with a given indentation
+/// level for flow management
 fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
     match statement {
         StatementType::Assign { targets, value } => {
@@ -1345,6 +1368,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
     }
 }
 
+/// Add an empty location to a node
 fn to_located<T>(node: T) -> Located<T> {
     Located {
         location: Location::new(0, 0),
@@ -1352,14 +1376,17 @@ fn to_located<T>(node: T) -> Located<T> {
     }
 }
 
+/// Clone an expression
 fn clone_expression(expression: &ExpressionType) -> ExpressionType {
     clone_expression_adapter(expression, &mut |located| located)
 }
 
+/// Clone parameters
 fn clone_parameters(args: &Parameters) -> Parameters {
     clone_parameters_adapter(args, &mut |located| located)
 }
 
+/// Clone an expression and apply a given function to each sub expression found
 fn clone_expression_adapter(
     expression: &ExpressionType,
     f: &mut impl FnMut(ExpressionType) -> ExpressionType,
@@ -1618,6 +1645,7 @@ fn clone_expression_adapter(
     f(local_expression)
 }
 
+/// Clone parameters and apply a given function to each sub expression found
 fn clone_parameters_adapter(
     args: &Parameters,
     f: &mut impl FnMut(ExpressionType) -> ExpressionType,
@@ -1697,8 +1725,8 @@ mod tests {
     use rustpython_vm as rvm;
     use rvm::{extend_class, py_class};
 
+    /// Use interpreter to return the outputs of a given python source code
     fn program_outputs(source: &str) -> String {
-
         rvm::Interpreter::without_stdlib(Default::default()).enter(|vm| {
             let scope = vm.new_scope_with_builtins();
             let buffer: Arc<Mutex<String>> = Arc::new(Mutex::new("".to_string()));
@@ -1754,6 +1782,7 @@ mod tests {
         
     }
 
+    /// Assert that the oneliner python code have the same outputs as the base one
     fn valid_output(source: &str) {
         let serialized = serialize_inlined(oneline(parse(source)));
 
