@@ -11,7 +11,6 @@ use super::super::python::serialize_expression;
 
 const PREP_KEY: &str = "__INL__";
 const CORE_NAME: &str = "__INL__CORE";
-const COND_NAME: &str = "__INL__COND";
 const TEMP_NAME: &str = "__INL__TEMP";
 const SPLIT_NAME: &str = "__INL__SPLIT";
 const STATE_NAME: &str = "__INL__STATE";
@@ -184,6 +183,11 @@ fn state_target() -> ExpressionType {
 /// 
 /// `__INL__STATE[1] > 1`
 fn check_state_target(target: u32) -> ExpressionType {
+    check_state_target_operator(target, Comparison::GreaterOrEqual)
+}
+
+/// Compare python state with current target with a custom operator
+fn check_state_target_operator(target: u32, comparison: Comparison) -> ExpressionType {
     ExpressionType::Compare {
         vals: vec![
             to_located(state_target()),
@@ -193,7 +197,7 @@ fn check_state_target(target: u32) -> ExpressionType {
                 },
             }),
         ],
-        ops: vec![Comparison::GreaterOrEqual],
+        ops: vec![comparison],
     }
 }
 
@@ -255,6 +259,23 @@ fn to_statement(expression: ExpressionType) -> StatementType {
     return StatementType::Expression {
         expression: to_located(expression),
     };
+}
+
+/// Make an list expression with the given elements subscripted at id [-1] 
+/// for returning the last value inside the list
+/// 
+/// ex: [x, return_value][-1]
+fn subscripted_list_return(elements: Vec<Located<ExpressionType>>) -> ExpressionType {
+    ExpressionType::Subscript { 
+        a: Box::from(to_located(ExpressionType::List { 
+            elements,
+        })), 
+        b: Box::from(to_located(ExpressionType::Number {
+            value: Number::Integer {
+                value: BigInt::from(-1),
+            },
+        })),
+    }
 }
 
 /// Move each import at the top of the program, they will stay as Statements
@@ -444,8 +465,8 @@ fn prepare_body(
             StatementType::Return { .. } => break,
             StatementType::Pass => break,
             StatementType::If { .. } => 1,
-            StatementType::While { .. } => 2,
-            StatementType::For { .. } => 2,
+            StatementType::While { .. } => 3,
+            StatementType::For { .. } => 3,
             _ => 0,
         };
 
@@ -667,16 +688,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                 })),
             }));
 
-            let lambda_body = to_located(ExpressionType::Subscript {
-                a: Box::from(to_located(ExpressionType::List {
-                    elements: lambda_statements,
-                })),
-                b: Box::from(to_located(ExpressionType::Number {
-                    value: Number::Integer {
-                        value: BigInt::from(-1),
-                    },
-                })),
-            });
+            let lambda_body = to_located(subscripted_list_return(lambda_statements));
 
             let lambda = ExpressionType::Lambda {
                 args: Box::from(clone_parameters(args)),
@@ -835,12 +847,13 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
         }
         StatementType::While { test, body, orelse } => {
             
-            // Find variants in test, add each as a param and replace with local name
-            let mut local_test = to_located(clone_expression(&test.node));
+            let mut condition: Located<ExpressionType> = to_located(clone_expression(&test.node));
             let mut variants = HashSet::new();
-            let local_level = level + 1;
+            let local_level = level + 2;
+            let previous_level = level;
 
-            local_test.node = clone_expression_adapter(&local_test.node, &mut |located| {
+            // Find variants in test, add each as a param and replace with local name
+            condition.node = clone_expression_adapter(&condition.node, &mut |located| {
                 if let ExpressionType::Identifier { name } = located {
                     variants.insert(name.to_string());
 
@@ -891,7 +904,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
             ]
             .concat();
 
-            let recursive_call = to_located(ExpressionType::Call {
+            let recursive_call = ExpressionType::Call {
                 function: Box::from(to_located(ExpressionType::Identifier {
                     name: CORE_NAME.to_string(),
                 })),
@@ -900,11 +913,13 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                     .map(|arg| to_located(ExpressionType::Identifier { name: arg.clone() }))
                     .collect::<Vec<Located<ExpressionType>>>(),
                 keywords: vec![],
-            });
+            };
 
-            body_composite.push(recursive_call);
-
-            let lambda_body = Box::from(to_located(ExpressionType::Subscript {
+            body_composite.push(to_located(clone_expression(&recursive_call)));
+            
+            // TODO: use subscripted_list_return if the adapter is not necessary?
+            // Why do we need to use local renamed variables in the first place?
+            let lambda_body = ExpressionType::Subscript {
                 a: Box::from(to_located(clone_expression_adapter(
                     &ExpressionType::List {
                         elements: body_composite,
@@ -928,7 +943,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                         value: BigInt::from(-1),
                     },
                 })),
-            }));
+            };
 
             let mut core_body = vec![];
 
@@ -949,24 +964,8 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                 }));
             }
 
-
-            // Before executing the body of the current iteration, we need to check that
-            // no changes have been made to the program flow in the last iteration body.
-            let flow_local_test = to_located(ExpressionType::BoolOp { 
-                op: BooleanOperator::And, 
-                values: vec![
-                    local_test,
-                    to_located(check_state_target(local_level))
-                ]
-            });
-
-            core_body.push(to_located(ExpressionType::NamedExpression {
-                left: Box::from(to_located(ExpressionType::Identifier {
-                    name: COND_NAME.to_string(),
-                })),
-                right: Box::from(flow_local_test),
-            }));
-
+            // Prepare the values for the return startement
+            // and local variables updates
             let mut return_state = vec![to_located(ExpressionType::Identifier {
                 name: STATE_NAME.to_string(),
             })];
@@ -981,15 +980,66 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                 return_state.push(to_located(ExpressionType::None));
             };
 
-            core_body.push(to_located(ExpressionType::IfExpression {
-                test: Box::from(to_located(ExpressionType::Identifier {
-                    name: COND_NAME.to_string(),
-                })),
-                body: Box::from(lambda_body),
-                orelse: Box::from(to_located(ExpressionType::Tuple {
-                    elements: return_state,
-                })),
-            }));
+            // Before executing the body of the current iteration, we need to check that
+            // no changes have been made to the program flow in the last iteration body.
+            // The flow tree for the loop execution will be the following:
+            //
+            // ```
+            // if target test
+            //   if condition test
+            //     if target -1 test (continue)
+            //       reset loop target
+            //       <go to next iter>
+            //     else
+            //       reset loop target
+            //       <play the loop>
+            //     end
+            //   else
+            //     reset to previous 
+            //     <return values>
+            //   end
+            // else
+            //   <return values>
+            // end
+            // ```
+
+            let target_continue_test = subscripted_list_return(
+                vec![to_located(ExpressionType::IfExpression {
+                test: Box::from(to_located(check_state_target_operator(local_level, Comparison::Less))),
+                body: Box::from(to_located(subscripted_list_return(vec![
+                    to_located(update_state(ExpressionType::None, local_level)), // reset loop target
+                    to_located(clone_expression(&recursive_call)), // <go to next iter>
+                ]))),
+                orelse: Box::from(to_located(subscripted_list_return(vec![
+                        to_located(update_state(ExpressionType::None, local_level)), // reset loop target
+                        to_located(lambda_body), // <play the loop>
+                ])))
+            })]);
+
+            let condition_test = subscripted_list_return(
+                vec![to_located(ExpressionType::IfExpression {
+                test: Box::from(condition), // if condition test
+                body: Box::from(to_located(target_continue_test)), // target continue test
+                orelse: Box::from(to_located(subscripted_list_return(vec![
+                    to_located(update_state(ExpressionType::None, previous_level)), // reset to previous target
+                    to_located(ExpressionType::Tuple { 
+                        elements: return_state.iter()
+                            .map(|r| to_located(clone_expression(&r.node)))
+                            .collect::<Vec<Located<ExpressionType>>>(), // <return values>
+                    })
+                ]))),
+            })]);
+
+            let target_test = subscripted_list_return(
+                vec![to_located(ExpressionType::IfExpression {
+                test: Box::from(to_located(check_state_target(local_level-1))), // if target test or continue
+                body: Box::from(to_located(condition_test)), // condition_test,
+                orelse: Box::from(
+                    to_located(ExpressionType::Tuple { elements: return_state }) // <return values>
+                )
+            })]);
+
+            core_body.push(to_located(target_test));
 
             let core_lambda = ExpressionType::Lambda {
                 args: Box::from(Parameters {
@@ -1008,16 +1058,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                     defaults: vec![],
                     kw_defaults: vec![],
                 }),
-                body: Box::from(to_located(ExpressionType::Subscript {
-                    a: Box::from(to_located(ExpressionType::List {
-                        elements: core_body,
-                    })),
-                    b: Box::from(to_located(ExpressionType::Number {
-                        value: Number::Integer {
-                            value: BigInt::from(-1),
-                        },
-                    })),
-                })),
+                body: Box::from(to_located(subscripted_list_return(core_body)))
             };
 
             let launch_lambda = ExpressionType::Lambda {
@@ -1221,8 +1262,8 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
             })),
         },
         StatementType::Pass => update_state(ExpressionType::None, level),
-        StatementType::Continue => update_state(ExpressionType::None, level),
-        StatementType::Break => update_state(ExpressionType::None, level - 1),
+        StatementType::Continue => update_state(ExpressionType::None, level - 3),
+        StatementType::Break => update_state(ExpressionType::None, level - 5),
         StatementType::Return { value } => match value {
             Some(value) => update_state(clone_expression(&value.node), 0),
             None => update_state(ExpressionType::None, 0),
@@ -1793,7 +1834,6 @@ mod tests {
                 move |_self: rvm::PyObjectRef, data: rvm::builtins::PyStrRef, _vm: &rvm::VirtualMachine| -> rvm::PyResult<()> {
                     let mut buffer = closure_buffer.lock().unwrap();
                     *buffer += data.as_str();
-                    // println!("test: {}", data.as_str());
                     Result::Ok(())
                 },
             );
@@ -1831,6 +1871,7 @@ mod tests {
     /// Assert that the oneliner python code have the same outputs as the base one
     fn valid_output(source: &str) {
         let serialized = serialize_inlined(oneline(parse(source)));
+        println!("{}", serialized);
 
         let expected = program_outputs(source);
         let oneliner = program_outputs(serialized.as_str());
@@ -2038,10 +2079,13 @@ else:
     #[test]
     fn for_loop_return() {
         let source = r#"
-for i in range(10):
-    if i == 2:
-        return
-    print(i)
+def main():
+    for i in range(10):
+        if i == 2:
+            return
+        print(i)
+
+main()
 "#;
         valid_output(source);
 
@@ -2094,12 +2138,54 @@ else:
     }
 
     #[test]
-    fn while_loop_flow_alteration() {
+    fn while_loop_break() {
         let source = r#"
-while True:
-    if True:
+i = 0
+while i < 10:
+    if i == 2:
         break
-print("ended")
+    i += 1
+    print(i)
+"#;
+        valid_output(source);
+    }
+
+    #[test]
+    fn while_loop_continue() {
+        let source = r#"
+i = 0
+while i < 10:
+    i += 1
+    if i == 2:
+        continue
+    print(i)
+"#;
+        valid_output(source);
+    }
+    #[test]
+    fn while_loop_pass() {
+        let source = r#"
+i = 0
+while i < 10:
+    if i == 2:
+        pass
+    i += 1
+    print(i)
+"#;
+        valid_output(source);
+    }
+
+    #[test]
+    fn while_loop_return() {
+        let source = r#"
+def main():
+    i = 0
+    while i < 10:
+        if i == 2:
+            return
+        i += 1
+        print(i)
+main()
 "#;
         valid_output(source);
     }
@@ -2120,9 +2206,12 @@ print(a.foo())
     #[test]
     fn remove_after_return() {
         let source = r#"
-print(1)
-return
-print(2)
+def main():
+    print(1)
+    return
+    print(2)
+
+main()
 "#;
         valid_output(source);
     }
@@ -2130,11 +2219,13 @@ print(2)
     #[test]
     fn split_after_return() {
         let source = r#"
-print(1)
-if True == 1:
-    return
-print(2)
-b = 1
+def main():
+    print(1)
+    if True:
+        return
+    print(2)
+
+main()
 "#;
         valid_output(source);
     }
@@ -2201,8 +2292,12 @@ print(math.pi)
     #[test]
     fn global_statement() {
         let source = r#"
-global a = 10
-print(a)
+a = 1
+def main():
+    global a
+    print(a)
+
+main()
 "#;
         valid_output(source);
     }
@@ -2211,10 +2306,11 @@ print(a)
     fn global_statement_update() {
         let source = r#"
 a = 1
-def test():
+def main():
     global a
     a = 2
-test()
+
+main()
 print(a)
 "#;
         valid_output(source);
