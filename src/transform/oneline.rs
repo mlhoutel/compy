@@ -254,6 +254,53 @@ fn optional_variable(identifier: String) -> ExpressionType {
     }
 }
 
+/// Explicitely infer an output source for scoped updates, for instance:
+/// 
+/// `[vars().__setitem__("next", __INL__TEMP[3])] if "next" in vars() else None,`
+fn optional_update(identifier: String, value: ExpressionType) -> ExpressionType {
+    ExpressionType::IfExpression { 
+        test: Box::from(to_located(ExpressionType::Compare {
+            vals: vec![
+                to_located(ExpressionType::String {
+                    value: StringGroup::Constant {
+                        value: identifier.to_string(),
+                    },
+                }),
+                to_located(ExpressionType::Call {
+                    function: Box::from(to_located(ExpressionType::Identifier {
+                        name: VARS_NAME.to_string(),
+                    })),
+                    args: vec![],
+                    keywords: vec![],
+                }),
+            ],
+            ops: vec![Comparison::In],
+        })),
+        body: Box::from(to_located(ExpressionType::Call {
+            function: Box::from(to_located(ExpressionType::Attribute {
+                value: Box::from(to_located(ExpressionType::Call {
+                    function: Box::from(to_located(ExpressionType::Identifier {
+                        name: VARS_NAME.to_string(),
+                    })),
+                    args: vec![],
+                    keywords: vec![],
+                })),
+                name: SETITEM_NAME.to_string()
+            })),
+            args: vec![
+                to_located(ExpressionType::String {
+                    value: StringGroup::Constant {
+                        value: identifier.to_string(),
+                    },
+                }),
+                to_located(value),
+            ],
+            keywords: vec![]
+        })),
+        orelse: Box::from(to_located(ExpressionType::None)) 
+    }
+}
+
 /// Convert an expression to a statement
 fn to_statement(expression: ExpressionType) -> StatementType {
     return StatementType::Expression {
@@ -465,8 +512,8 @@ fn prepare_body(
             StatementType::Return { .. } => break,
             StatementType::Pass => break,
             StatementType::If { .. } => 1,
-            StatementType::While { .. } => 3,
-            StatementType::For { .. } => 3,
+            StatementType::While { .. } => 2,
+            StatementType::For { .. } => 2,
             _ => 0,
         };
 
@@ -475,7 +522,7 @@ fn prepare_body(
             let flow_target = level + split_flow - 1; // to account for split_flow that start at 1
             
             let check_state = ExpressionType::IfExpression {
-                test: Box::from(to_located(check_state_target(level))),
+                test: Box::from(to_located(check_state_target(level + 1))),
                 body: Box::from(to_located(ExpressionType::List {
                     elements: prepare_body(body, flow_target, i + 1),
                 })),
@@ -875,7 +922,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
             // was met, if so, it will play the current while body. Otherwise, it will return the state and all
             // locally copied variable that were potentially modified for update them in the upper scope
 
-            let mut body_composite = prepare_body(body, local_level, 0);
+            let mut body_composite = prepare_body(body, local_level - 1, 0);
 
             // Find each used variable used in the body to preemptively include them
             // from the external scope, in case if they are already present
@@ -1143,12 +1190,10 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                 })),
             }));
 
-            for (i, variant) in exports.iter().enumerate() {
-                call_operations.push(to_located(ExpressionType::NamedExpression {
-                    left: Box::from(to_located(ExpressionType::Identifier {
-                        name: variant.to_string(),
-                    })),
-                    right: Box::from(to_located(ExpressionType::Subscript {
+            for (i, variant) in exports.iter().enumerate() {   
+                call_operations.push(to_located(optional_update(
+                    variant.to_string(),
+                    ExpressionType::Subscript {
                         a: Box::from(to_located(ExpressionType::Identifier {
                             name: TEMP_NAME.to_string(),
                         })),
@@ -1157,8 +1202,8 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                                 value: BigInt::from(i + 1),
                             },
                         })),
-                    })),
-                }));
+                    }
+                )));
             }
 
             if let Some(orelse) = orelse {
@@ -1262,8 +1307,8 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
             })),
         },
         StatementType::Pass => update_state(ExpressionType::None, level),
-        StatementType::Continue => update_state(ExpressionType::None, level - 3),
-        StatementType::Break => update_state(ExpressionType::None, level - 5),
+        StatementType::Continue => update_state(ExpressionType::None, level - 2),
+        StatementType::Break => update_state(ExpressionType::None, level - 4),
         StatementType::Return { value } => match value {
             Some(value) => update_state(clone_expression(&value.node), 0),
             None => update_state(ExpressionType::None, 0),
@@ -2021,6 +2066,36 @@ sprint(a)
     }
 
     #[test]
+    fn function_scoped_variable() {
+        let source = r#"
+a = 1
+
+def test():
+    a = 2
+
+print(a)
+test()
+print(a)
+"#;
+        valid_output(source);
+    }
+
+    #[test]
+    fn function_reference_variable() {
+        let source = r#"
+a = 1
+
+def test(a):
+    a = 2
+
+print(a)
+test(a)
+print(a)
+"#;
+        valid_output(source);
+    }
+
+    #[test]
     fn function_declaration_decorated() {
         let source = r#"
 a = 1
@@ -2114,6 +2189,16 @@ for i in range(10):
     }
 
     #[test]
+    fn for_loop_in_for_loop() {
+        let source = r#"
+for i in range(10):
+    for j in range(10):
+        print(i, j)
+"#;
+        valid_output(source);
+    }
+
+    #[test]
     fn while_loop() {
         let source = r#"
 i = 0
@@ -2188,6 +2273,20 @@ def main():
 main()
 "#;
         valid_output(source);
+    }
+
+    #[test]
+    fn while_loop_in_while_loop() {
+               let source = r#"
+i = 0
+while i < 10:
+    i += 1
+    j = 0
+    while j < 10:
+        j += 1
+        print(i, j)
+"#;
+        valid_output(source); 
     }
 
     #[test]
