@@ -28,7 +28,7 @@ pub fn serialize_inlined(ast: Program) -> String {
         .concat()
 }
 
-fn serialize_statement(statement: &StatementType) -> String {
+pub fn serialize_statement(statement: &StatementType) -> String {
     let mut text = "".to_string();
 
     match statement {

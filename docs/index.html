@@ -4,43 +4,79 @@
     <meta charset="UTF-8" />
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Compy demo</title>
-    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.15/dist/tailwind.min.css" rel="stylesheet" />
+    <title>COMPY</title>
+    <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/petite-vue" defer></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.12/ace.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js"></script>
   </head>
-  <body>
-    <div id="app" @vue:mounted="mounted" class="p-5">
-      <div class="flex flex-col sm:flex-row whitespace-nowrap pb-5 px-5">
-        <h1 class="text-2xl font-bold pr-2">Compy</h1>
-        <p class="sm:pt-3 italic">transformations on python programs</p>
+  <body style="background-color: #282a36; height: 100vh">
+    <div id="app" @vue:mounted="mounted" class="h-full flex-col p-5 font-mono text-white">
+      <div class="flex pb-5">
+        <h1 class="text-2xl font-bold mx-auto">COMPY</h1>
+        <a href="https://github.com/mlhoutel/compy">
+          <img class="invert w-10 h-8" src="https://upload.wikimedia.org/wikipedia/commons/9/91/Octicons-mark-github.svg" alt="github logo" />
+        </a>
+      </div>
 
-        <div class="flex sm:justify-end w-full h-10 mt-5 sm:mt-0">
-          <select class="mr-3 rounded border-solid border border-black font-bold h-full px-3 outline-none bg-gray-100" v-model="selected">
-            <option v-for="t in transformations" :value="t" :key="t" v-text="t">nothing</option>
-          </select>
+      <div class="flex-auto h-full sm:flex px-2 py-2" style="background-color: #383a47">
+        <div class="w-full overflow-hidden">
+          <div class="flex content-between px-2 py-1 bg-sky-600 relative">
+            <div>Input code</div>
 
-          <button @click="transform" class="font-bold rounded border-solid border border-black px-3 outline-none bg-gray-100">Transform</button>
+            <div class="grow"></div>
+
+            <div>
+              <button @click="transform" class="font-bold">[1]Transform</button>
+              <select class="bg-sky-600" v-model="selected">
+                <option v-for="t in transformations" :value="t" :key="t" v-text="t">oneline</option>
+              </select>
+            </div>
+          </div>
+
+          <div id="inputSnippet" class="rounded-b-md" style="height: 100%; min-height: 300px"></div>
+        </div>
+
+        <div class="w-5 h-2"></div>
+
+        <div class="w-full flex-col overflow-hidden">
+          <div class="grow">
+            <div class="flex content-between px-2 py-1 bg-sky-600 relative">
+              <div>Output code</div>
+
+              <div class="grow"></div>
+
+              <div>
+                <button @click="run" class="font-bold">[2]Run</button>
+                <button @click="copy" class="font-bold">[3]Copy</button>
+              </div>
+            </div>
+
+            <div id="outputSnippet" class="rounded-b-md" style="height: 100%; min-height: 300px"></div>
+          </div>
+
+          <div class="w-5 h-2"></div>
+
+          <div class="flex-1 h-full overflow-hidden">
+            <div class="flex content-between px-2 py-1 bg-sky-600 relative">
+              <div>Terminal</div>
+            </div>
+            <div class="h-full w-full" style="background-color: #282a36">
+              <pre><code class="px-1 py-1 break-all whitespace-pre-wrap" v-text="terminal"></code></pre>
+            </div>
+          </div>
         </div>
       </div>
 
-      <div>
-        <h3>Input Code:</h3>
-        <div id="inputSnippet" class="rounded-md" style="height: 300px"></div>
+      <div class="flex-none flex justify-center">
+        <div class="px-3 py-1">browse project sources at <a href="https://github.com/mlhoutel/compy" class="underline">https://github.com/mlhoutel/compy</a></div>
       </div>
-
-      <div class="relative">
-        <h3>Output Code:</h3>
-        <div id="outputSnippet" class="rounded-md" style="height: 300px"></div>
-
-        <button @click="copy" class="absolute right-1 top-7 px-3 py-1 font-bold rounded border-solid border border-black outline-none bg-gray-100">Copy</button>
-      </div>
-
-      <div class="px-3 py-1">browse project sources at <a href="https://github.com/mlhoutel/compy" class="underline">https://github.com/mlhoutel/compy</a></div>
     </div>
 
+    <style></style>
+
     <script type="module">
-      import init, { transform_nothing, transform_oneline } from "./static/compy_demo.js";
+      import init, { transform_nothing, transform_oneline } from "./static/compy_wasm.js";
 
       init().then(() => {
         PetiteVue.createApp({
@@ -48,9 +84,11 @@
             nothing: transform_nothing,
             oneline: transform_oneline,
           },
-          selected: "nothing",
+          selected: "oneline",
           input: "",
           output: "",
+          terminal: "",
+          python: undefined,
           inputSnippet: undefined,
           outputSnippet: undefined,
           get transformations() {
@@ -67,11 +105,12 @@
           },
           mounted() {
             this.monaco();
+            this.inputs();
             this.transform();
           },
           monaco() {
             this.inputSnippet = ace.edit("inputSnippet");
-            this.inputSnippet.setTheme("ace/theme/monokai");
+            this.inputSnippet.setTheme("ace/theme/dracula");
             this.inputSnippet.session.setMode("ace/mode/python");
             this.inputSnippet.session.setUseWrapMode(true);
 
@@ -80,14 +119,45 @@
             });
 
             this.outputSnippet = ace.edit("outputSnippet");
-            this.outputSnippet.setTheme("ace/theme/monokai");
+            this.outputSnippet.setTheme("ace/theme/dracula");
             this.outputSnippet.session.setMode("ace/mode/python");
             this.outputSnippet.session.setUseWrapMode(true);
             this.outputSnippet.setReadOnly(true);
           },
+          inputs() {
+            document.addEventListener("keydown", (e) => {
+              if (!this.inputSnippet.isFocused() && !this.outputSnippet.isFocused()) {
+                if (e.key == "1") {
+                  this.transform();
+                } else if (e.key == "2") {
+                  this.run();
+                } else if (e.key == "3") {
+                  this.copy();
+                }
+              }
+            });
+          },
           copy() {
             navigator.clipboard.writeText(this.output);
             alert("Output copied to clipboard");
+          },
+          async run() {
+            this.terminal = "";
+
+            if (!this.python) {
+              this.terminal += "loading pyodide...\n";
+              this.python = await loadPyodide({
+                stdout: (t) => (this.terminal += `${t}\n`),
+                stderr: (e) => (this.terminal += `ERROR: ${e}\n`),
+              });
+            }
+
+            try {
+              this.python.runPython(`import sys\nprint(sys.version)`);
+              this.python.runPython(this.outputSnippet.getValue());
+            } catch (e) {
+              this.terminal += `ERROR: ${e}\n`;
+            }
           },
         }).mount();
       });

@@ -1,21 +1,22 @@
-use crate::python::parse;
+use crate::{python::parse, serialize_statement};
 use num_bigint::BigInt;
-use rustpython_parser::ast::{
+use rustpython_parser::{ast::{
     BooleanOperator, Comparison, Comprehension, ComprehensionKind, ConversionFlag, ExpressionType,
     ImportSymbol, Keyword, Located, Location, Number, Operator, Parameter, Parameters, Program,
     StatementType, StringGroup, UnaryOperator, Varargs,
-};
+}, parser};
 use std::collections::{HashSet, VecDeque};
 
 use super::super::python::serialize_expression;
 
-const PREP_KEY: &str = "__INL__";
-const CORE_NAME: &str = "__INL__CORE";
-const COND_NAME: &str = "__INL__COND";
-const TEMP_NAME: &str = "__INL__TEMP";
-const SPLIT_NAME: &str = "__INL__SPLIT";
-const STATE_NAME: &str = "__INL__STATE";
-const IMPORT_KEY: &str = "__INL__IMPORT_";
+const CORE_NAME: &str = "INL__CORE";
+const TEMP_NAME: &str = "INL__TEMP";
+const SPLIT_NAME: &str = "INL__SPLIT";
+const STATE_NAME: &str = "INL__STATE";
+const IMPORT_KEY: &str = "INL__IMPORT_";
+const ITER_NAME: &str = "INL__ITER";
+const ITER_CURSOR: &str = "INL__ITCUR";
+const STOP_COND: &str = "INL__STOP";
 const VARS_NAME: &str = "vars";
 const HASATTR_NAME: &str = "hasattr";
 const GLOBALS_NAME: &str = "globals";
@@ -24,6 +25,8 @@ const SLICE_NAME: &str = "slice";
 const EMPTY_NAME: &str = "_";
 const THROW_NAME: &str = "throw";
 const SYSTEM_NAME: &str = "sys";
+const TOITER_NAME: &str = "iter";
+const NEXT_NAME: &str = "next";
 const CTYPE_NAME: &str = "ctypes";
 const INSPECT_NAME: &str = "inspect";
 const EXCEPTHOOK_NAME: &str = "excepthook";
@@ -32,24 +35,25 @@ const SETATTR_NAME: &str = "setattr";
 const DELATTR_NAME: &str = "delattr";
 const SETITEM_NAME: &str = "__setitem__";
 const DELITEM_NAME: &str = "__delitem__";
-const TEMP_EXCEPTHOOK: &str = "__INL__EXCEPTHOOK";
+const TEMP_EXCEPTHOOK: &str = "INL__EXCEPTHOOK";
 const EXCEPTION_DEF_TYPE: &str = "RuntimeError";
 const EXCEPTION_DEF_MSG: &str = "No active exception to reraise";
 
-/*
-* Manual state handling:
-*
-* we assume that all code in a branch after a return, pass, or continue statement can be eliminated.
-* we also assume that if a return statement happens in a conditional statement, all remaining code will execute in the else block.
-*
-* as such, we can handle the execution flow in the state variable
-* [0] Return value buffer
-* [1] Target indentation
-*
-* We can then define this state in each function and add checks in conditionals to iterate towards the target indentation.
-* (i): this may add extra code and checks, which could potentially affect program performance, but it's the only effective solution I've come up with.
-*/
 
+/// Transform a python program to a one-liner python program
+///
+/// > **Manual state handling:**
+/// >
+/// > we assume that all code in a branch after a return, pass, or continue statement can be eliminated.
+/// > we also assume that if a return statement happens in a conditional statement, all remaining code will execute in the else block.
+/// >
+/// > as such, we can handle the execution flow in the state variable
+/// >  * [0] Return value buffer
+/// >  * [1] Target indentation
+/// >
+/// > We can then define this state in each function and add checks in conditionals to iterate towards the target indentation.
+/// > 
+/// > (i): this may add extra code and checks, which could potentially affect program performance.
 pub fn oneline(ast: Program) -> Program {
     let mut local = Program { statements: vec![] };
 
@@ -127,14 +131,14 @@ pub fn oneline(ast: Program) -> Program {
     return local;
 }
 
-fn to_internal(s: String) -> String {
-    format!("{}{}", PREP_KEY, s)
-}
-
+/// Reset the state with base values (None, 1) at the beggining of a new body
 fn reset_state() -> ExpressionType {
     update_state(ExpressionType::None, 1)
 }
 
+/// Update the current state with the value and new target indentation, for instance:
+/// 
+/// `__INL__STATE := (None, 1)`
 fn update_state(value: ExpressionType, target: u32) -> ExpressionType {
     ExpressionType::NamedExpression {
         left: Box::from(to_located(ExpressionType::Identifier {
@@ -153,6 +157,9 @@ fn update_state(value: ExpressionType, target: u32) -> ExpressionType {
     }
 }
 
+/// Extract the current indentation from the python state, for instance:
+/// 
+/// `__INL__STATE[1]`
 fn state_target() -> ExpressionType {
     ExpressionType::Subscript {
         a: Box::from(to_located(ExpressionType::Identifier {
@@ -166,7 +173,15 @@ fn state_target() -> ExpressionType {
     }
 }
 
+/// Compare python state with current target, for instance:
+/// 
+/// `__INL__STATE[1] > 1`
 fn check_state_target(target: u32) -> ExpressionType {
+    check_state_target_operator(target, Comparison::GreaterOrEqual)
+}
+
+/// Compare python state with current target with a custom operator
+fn check_state_target_operator(target: u32, comparison: Comparison) -> ExpressionType {
     ExpressionType::Compare {
         vals: vec![
             to_located(state_target()),
@@ -176,10 +191,13 @@ fn check_state_target(target: u32) -> ExpressionType {
                 },
             }),
         ],
-        ops: vec![Comparison::Greater],
+        ops: vec![comparison],
     }
 }
 
+/// Explicitely infer an argument source, for instance:
+/// 
+/// `print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None)`
 fn optional_variable(identifier: String) -> ExpressionType {
     ExpressionType::IfExpression {
         test: Box::from(to_located(ExpressionType::Compare {
@@ -230,16 +248,81 @@ fn optional_variable(identifier: String) -> ExpressionType {
     }
 }
 
+/// Explicitely infer an output source for scoped updates, for instance:
+/// 
+/// `[vars().__setitem__("next", __INL__TEMP[3])] if "next" in vars() else None,`
+fn optional_update(identifier: String, value: ExpressionType) -> ExpressionType {
+    ExpressionType::IfExpression { 
+        test: Box::from(to_located(ExpressionType::Compare {
+            vals: vec![
+                to_located(ExpressionType::String {
+                    value: StringGroup::Constant {
+                        value: identifier.to_string(),
+                    },
+                }),
+                to_located(ExpressionType::Call {
+                    function: Box::from(to_located(ExpressionType::Identifier {
+                        name: VARS_NAME.to_string(),
+                    })),
+                    args: vec![],
+                    keywords: vec![],
+                }),
+            ],
+            ops: vec![Comparison::In],
+        })),
+        body: Box::from(to_located(ExpressionType::Call {
+            function: Box::from(to_located(ExpressionType::Attribute {
+                value: Box::from(to_located(ExpressionType::Call {
+                    function: Box::from(to_located(ExpressionType::Identifier {
+                        name: VARS_NAME.to_string(),
+                    })),
+                    args: vec![],
+                    keywords: vec![],
+                })),
+                name: SETITEM_NAME.to_string()
+            })),
+            args: vec![
+                to_located(ExpressionType::String {
+                    value: StringGroup::Constant {
+                        value: identifier.to_string(),
+                    },
+                }),
+                to_located(value),
+            ],
+            keywords: vec![]
+        })),
+        orelse: Box::from(to_located(ExpressionType::None)) 
+    }
+}
+
+/// Convert an expression to a statement
 fn to_statement(expression: ExpressionType) -> StatementType {
     return StatementType::Expression {
         expression: to_located(expression),
     };
 }
 
-// We move each import at the top of the program, they will stay as Statements
-// and will be inlined with ";" separators. To keep the potential scoping of the import,
-// we will prepend the moved global import with an identifier, and re-declare their
-// true identifier with the prepended version at the time they are truly imported.
+/// Make an list expression with the given elements subscripted at id [-1] 
+/// for returning the last value inside the list
+/// 
+/// ex: [x, return_value][-1]
+fn subscripted_list_return(elements: Vec<Located<ExpressionType>>) -> ExpressionType {
+    ExpressionType::Subscript { 
+        a: Box::from(to_located(ExpressionType::List { 
+            elements,
+        })), 
+        b: Box::from(to_located(ExpressionType::Number {
+            value: Number::Integer {
+                value: BigInt::from(-1),
+            },
+        })),
+    }
+}
+
+/// Move each import at the top of the program, they will stay as Statements
+/// and will be inlined with ";" separators. To keep the potential scoping of the import,
+/// we will prepend the moved global import with an identifier, and re-declare their
+/// true identifier with the prepended version at the time they are truly imported.
 fn extract_imports(body: &Vec<Located<StatementType>>) -> Vec<Located<StatementType>> {
     let mut imports = vec![];
     for statement in body {
@@ -392,6 +475,9 @@ fn extract_imports(body: &Vec<Located<StatementType>>) -> Vec<Located<StatementT
     imports
 }
 
+/// Prepare a body with a given level and from a certain point
+/// for flow management (handle program branchings and flow 
+/// statement like return, break, pass, continue)
 fn prepare_body(
     body: &Vec<Located<StatementType>>,
     level: u32,
@@ -426,11 +512,12 @@ fn prepare_body(
         };
 
         // Add a check on the state after each for/while loop and if statements
-        if split_flow > 0 {
+        // if there still is some code after the branching
+        if split_flow > 0 && (i + 1) < body.len() {
             let flow_target = level + split_flow - 1; // to account for split_flow that start at 1
             
             let check_state = ExpressionType::IfExpression {
-                test: Box::from(to_located(check_state_target(level))),
+                test: Box::from(to_located(check_state_target(level + 1))),
                 body: Box::from(to_located(ExpressionType::List {
                     elements: prepare_body(body, flow_target, i + 1),
                 })),
@@ -504,6 +591,7 @@ fn global_update(global: String) -> Located<ExpressionType> {
     })
 }
 
+/// Convert an assign to an one-liner compatible one
 fn inline_assign_statement(
     target: &Located<ExpressionType>,
     value: &Located<ExpressionType>,
@@ -547,6 +635,7 @@ fn inline_assign_statement(
     }
 }
 
+/// Convert an assign list to a list of assignments
 fn inline_assign_list(
     elements: &Vec<Located<ExpressionType>>,
     value: &Located<ExpressionType>,
@@ -577,6 +666,8 @@ fn inline_assign_list(
     ExpressionType::List { elements: elems }
 }
 
+/// Convert a statement to a one-liner expression with a given indentation
+/// level for flow management
 fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
     match statement {
         StatementType::Assign { targets, value } => {
@@ -639,16 +730,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                 })),
             }));
 
-            let lambda_body = to_located(ExpressionType::Subscript {
-                a: Box::from(to_located(ExpressionType::List {
-                    elements: lambda_statements,
-                })),
-                b: Box::from(to_located(ExpressionType::Number {
-                    value: Number::Integer {
-                        value: BigInt::from(-1),
-                    },
-                })),
-            });
+            let lambda_body = to_located(subscripted_list_return(lambda_statements));
 
             let lambda = ExpressionType::Lambda {
                 args: Box::from(clone_parameters(args)),
@@ -676,106 +758,155 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
             lambda_var
         }
         StatementType::For {
-            is_async,
+            is_async: _,
             target,
             iter,
             body,
             orelse,
         } => {
-            // escaping fields are handled in the list comprehension
-            let mut variants = HashSet::new();
+            // Transform the python loop to a While statement before inlining it
+            // 
+            // for (i in range(10)):
+            //          <=>
+            // it = iter(range(10))
+            // cur = next(it, "STOP") 
+            // while cur != "STOP":
+            //      i = cur
+            //      cur = next(it, "STOP") 
+            // `it = iter(range(10))`
 
-            // Find variants in loop target
-            clone_expression_adapter(&target.node, &mut |located| {
-                if let ExpressionType::Identifier { name } = &located {
-                    variants.insert(name.to_string());
-                };
 
-                located
-            });
+            // We need to explicitly add the current indentation for the iterator and the cursor
+            // to avoid sharing it with lower loops when several for loops are nested.
+            let local_iter_name = ITER_NAME.to_string() + "__" + level.to_string().as_str();
+            let local_cursor_name = ITER_CURSOR.to_string() + "__" + level.to_string().as_str();
 
-            // Add redeclare each in the local scope
-            let mut local_body = Vec::from_iter(variants.clone())
-                .iter()
-                .map(|variant| {
-                    to_located(ExpressionType::NamedExpression {
-                        left: Box::from(to_located(ExpressionType::Identifier {
-                            name: to_internal(variant.to_string()),
-                        })),
-                        right: Box::from(to_located(ExpressionType::Identifier {
-                            name: variant.to_string(),
-                        })),
-                    })
+            let iter_assign = ExpressionType::NamedExpression { 
+                left: Box::from(to_located(ExpressionType::Identifier { 
+                    name: local_iter_name.to_string()
+                })), 
+                right: Box::from(to_located(ExpressionType::Call { 
+                    function: Box::from(to_located(ExpressionType::Identifier { 
+                        name: TOITER_NAME.to_string() 
+                    })),
+                    args: vec![to_located(clone_expression(&iter.node))], 
+                    keywords: vec![] 
+                })),
+            };
+
+            // `cur = next(it, "STOP")`
+            let cur_assign = ExpressionType::NamedExpression { 
+                left: Box::from(to_located(ExpressionType::Identifier { 
+                    name: local_cursor_name.to_string(),
+                })), 
+                right: Box::from(to_located(ExpressionType::Call { 
+                    function: Box::from(to_located(ExpressionType::Identifier {
+                            name: NEXT_NAME.to_string() 
+                    })), 
+                    args: vec![
+                        to_located(ExpressionType::Identifier { 
+                            name: local_iter_name.to_string()
+                        }),
+                        to_located(ExpressionType::String { value:
+                            StringGroup::Constant { 
+                                value: STOP_COND.to_string()  
+                            } 
+                        })
+                    ], 
+                    keywords: vec![], 
+                })),
+            };
+
+            let mut new_body = vec![];
+
+            // To account for case where there is tuple unpacking, we temporarly
+            // assign the iterator value to a cursor variable, then unpack and 
+            // assign it at the beggining of the while body.
+            // `i = cur`
+            new_body.push(to_located(StatementType::Assign { 
+                targets: vec![to_located(clone_expression(&target.node))], 
+                value: to_located(ExpressionType::Identifier { 
+                    name: local_cursor_name.to_string(),
+                }) 
+            }));
+            
+            // `cur = next(it, "STOP")`
+            new_body.push(to_located(StatementType::Assign { 
+                targets: vec![
+                    to_located(ExpressionType::Identifier { 
+                        name: local_cursor_name.to_string(),
+                    }) 
+                ], 
+                value: to_located(ExpressionType::Call { 
+                    function: Box::from(to_located(ExpressionType::Identifier {
+                            name: NEXT_NAME.to_string() 
+                    })), 
+                    args: vec![
+                        to_located(ExpressionType::Identifier { 
+                            name: local_iter_name.to_string() 
+                        }),
+                        to_located(ExpressionType::String { value:
+                            StringGroup::Constant { 
+                                value: STOP_COND.to_string()  
+                            } 
+                        })
+                    ], 
+                    keywords: vec![], 
                 })
-                .collect::<Vec<Located<ExpressionType>>>();
+            }));
 
-            let prepared_body = prepare_body(body, level, 0);
-
-            for lin in prepared_body.iter() {
-                let mut local_lin = to_located(clone_expression(&lin.node));
-
-                local_lin.node = clone_expression_adapter(&local_lin.node, &mut |located| {
-                    if let ExpressionType::Identifier { name } = &located {
-                        if variants.contains(&name.to_string()) {
-                            return ExpressionType::Identifier {
-                                name: to_internal(name.to_string()),
-                            };
-                        }
-                    };
-
-                    located
-                });
-
-                local_body.push(local_lin);
+            // inject the body of the for loop into the while loop
+            for b in body {
+                new_body.append(&mut parser::parse_statement(&serialize_statement(&b.node)).ok().unwrap());
             }
-            let lambda_body = to_located(ExpressionType::List {
-                elements: local_body,
-            });
 
-            let kind = ComprehensionKind::List {
-                element: lambda_body,
-            };
+            let mut new_orelse = vec![];
 
-            let generators = vec![Comprehension {
-                location: Location::new(0, 0),
-                target: to_located(clone_expression(&target.node)),
-                iter: to_located(clone_expression(&iter.node)),
-                ifs: vec![],
-                is_async: is_async.clone(),
-            }];
-
-            let comprehension = ExpressionType::Comprehension {
-                kind: Box::from(kind),
-                generators: generators,
-            };
-
+            // inject the or else body of the for loop into the or else while loop
             if let Some(orelse) = orelse {
-                let orelse_body = to_located(ExpressionType::List {
-                    elements: orelse
-                        .iter()
-                        .map(|lin| to_located(to_expression(&lin.node, level + 1)))
-                        .collect::<Vec<Located<ExpressionType>>>(),
-                });
-
-                ExpressionType::List {
-                    elements: vec![to_located(comprehension), orelse_body],
+                for o in orelse {
+                    new_orelse.append(&mut parser::parse_statement(&serialize_statement(&o.node)).ok().unwrap());
                 }
-            } else {
-                comprehension
+            }
+
+            // `while cur != "STOP":`
+            let while_statement = StatementType::While { 
+                test: to_located(ExpressionType::Compare { 
+                    vals: vec![
+                        to_located(ExpressionType::Identifier { name: local_cursor_name.to_string() }),
+                        to_located(ExpressionType::String { value: StringGroup::Constant { value: STOP_COND.to_string() } })
+                    ], 
+                    ops: vec![Comparison::NotEqual] 
+                }), 
+                body: new_body,
+                orelse: match orelse {
+                    Some(_) => Some(new_orelse),
+                    None => None,
+                }
+            };
+
+            ExpressionType::List { 
+                elements: vec![
+                    to_located(iter_assign), 
+                    to_located(cur_assign),
+                    to_located(to_expression(&while_statement, level))
+                ]
             }
         }
         StatementType::While { test, body, orelse } => {
-            // Find variants in test, add each as a param and replace with local name
-
-            let mut local_test = to_located(clone_expression(&test.node));
+            
+            let mut condition: Located<ExpressionType> = to_located(clone_expression(&test.node));
             let mut variants = HashSet::new();
+            let local_level = level + 2;
+            let previous_level = level;
 
-            local_test.node = clone_expression_adapter(&local_test.node, &mut |located| {
+            // Find variants in test, add each as a param and replace with local name
+            condition.node = clone_expression_adapter(&condition.node, &mut |located| {
                 if let ExpressionType::Identifier { name } = located {
                     variants.insert(name.to_string());
 
                     return ExpressionType::Identifier {
-                        name: to_internal(name.to_string()),
+                        name: name.to_string()
                     };
                 };
 
@@ -792,7 +923,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
             // was met, if so, it will play the current while body. Otherwise, it will return the state and all
             // locally copied variable that were potentially modified for update them in the upper scope
 
-            let mut body_composite = prepare_body(body, level, 0);
+            let mut body_composite = prepare_body(body, local_level - 1, 0);
 
             // Find each used variable used in the body to preemptively include them
             // from the external scope, in case if they are already present
@@ -821,7 +952,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
             ]
             .concat();
 
-            let recursive_call = to_located(ExpressionType::Call {
+            let recursive_call = ExpressionType::Call {
                 function: Box::from(to_located(ExpressionType::Identifier {
                     name: CORE_NAME.to_string(),
                 })),
@@ -830,11 +961,13 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                     .map(|arg| to_located(ExpressionType::Identifier { name: arg.clone() }))
                     .collect::<Vec<Located<ExpressionType>>>(),
                 keywords: vec![],
-            });
+            };
 
-            body_composite.push(recursive_call);
-
-            let lambda_body = Box::from(to_located(ExpressionType::Subscript {
+            body_composite.push(to_located(clone_expression(&recursive_call)));
+            
+            // TODO: use subscripted_list_return if the adapter is not necessary?
+            // Why do we need to use local renamed variables in the first place?
+            let lambda_body = ExpressionType::Subscript {
                 a: Box::from(to_located(clone_expression_adapter(
                     &ExpressionType::List {
                         elements: body_composite,
@@ -845,7 +978,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                                 || variables.contains(&name.to_string())
                             {
                                 return ExpressionType::Identifier {
-                                    name: to_internal(name.to_string()),
+                                    name: name.to_string()
                                 };
                             }
                         };
@@ -858,7 +991,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                         value: BigInt::from(-1),
                     },
                 })),
-            }));
+            };
 
             let mut core_body = vec![];
 
@@ -868,35 +1001,8 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
             ]
             .concat();
 
-            for variant in &exports {
-                core_body.push(to_located(ExpressionType::NamedExpression {
-                    left: Box::from(to_located(ExpressionType::Identifier {
-                        name: to_internal(variant.to_string()),
-                    })),
-                    right: Box::from(to_located(ExpressionType::Identifier {
-                        name: variant.to_string(),
-                    })),
-                }));
-            }
-
-
-            // Before executing the body of the current iteration, we need to check that
-            // no changes have been made to the program flow in the last iteration body.
-            let flow_local_test = to_located(ExpressionType::BoolOp { 
-                op: BooleanOperator::And, 
-                values: vec![
-                    local_test,
-                    to_located(check_state_target(level))
-                ]
-            });
-
-            core_body.push(to_located(ExpressionType::NamedExpression {
-                left: Box::from(to_located(ExpressionType::Identifier {
-                    name: COND_NAME.to_string(),
-                })),
-                right: Box::from(flow_local_test),
-            }));
-
+            // Prepare the values for the return startement
+            // and local variables updates
             let mut return_state = vec![to_located(ExpressionType::Identifier {
                 name: STATE_NAME.to_string(),
             })];
@@ -911,15 +1017,66 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                 return_state.push(to_located(ExpressionType::None));
             };
 
-            core_body.push(to_located(ExpressionType::IfExpression {
-                test: Box::from(to_located(ExpressionType::Identifier {
-                    name: COND_NAME.to_string(),
-                })),
-                body: Box::from(lambda_body),
-                orelse: Box::from(to_located(ExpressionType::Tuple {
-                    elements: return_state,
-                })),
-            }));
+            // Before executing the body of the current iteration, we need to check that
+            // no changes have been made to the program flow in the last iteration body.
+            // The flow tree for the loop execution will be the following:
+            //
+            // ```
+            // if target test
+            //   if condition test
+            //     if target -1 test (continue)
+            //       reset loop target
+            //       <go to next iter>
+            //     else
+            //       reset loop target
+            //       <play the loop>
+            //     end
+            //   else
+            //     reset to previous 
+            //     <return values>
+            //   end
+            // else
+            //   <return values>
+            // end
+            // ```
+
+            let target_continue_test = subscripted_list_return(
+                vec![to_located(ExpressionType::IfExpression {
+                test: Box::from(to_located(check_state_target_operator(local_level, Comparison::Less))),
+                body: Box::from(to_located(subscripted_list_return(vec![
+                    to_located(update_state(ExpressionType::None, local_level)), // reset loop target
+                    to_located(clone_expression(&recursive_call)), // <go to next iter>
+                ]))),
+                orelse: Box::from(to_located(subscripted_list_return(vec![
+                        to_located(update_state(ExpressionType::None, local_level)), // reset loop target
+                        to_located(lambda_body), // <play the loop>
+                ])))
+            })]);
+
+            let condition_test = subscripted_list_return(
+                vec![to_located(ExpressionType::IfExpression {
+                test: Box::from(condition), // if condition test
+                body: Box::from(to_located(target_continue_test)), // target continue test
+                orelse: Box::from(to_located(subscripted_list_return(vec![
+                    to_located(update_state(ExpressionType::None, previous_level)), // reset to previous target
+                    to_located(ExpressionType::Tuple { 
+                        elements: return_state.iter()
+                            .map(|r| to_located(clone_expression(&r.node)))
+                            .collect::<Vec<Located<ExpressionType>>>(), // <return values>
+                    })
+                ]))),
+            })]);
+
+            let target_test = subscripted_list_return(
+                vec![to_located(ExpressionType::IfExpression {
+                test: Box::from(to_located(check_state_target(local_level-1))), // if target test or continue
+                body: Box::from(to_located(condition_test)), // condition_test,
+                orelse: Box::from(
+                    to_located(ExpressionType::Tuple { elements: return_state }) // <return values>
+                )
+            })]);
+
+            core_body.push(to_located(target_test));
 
             let core_lambda = ExpressionType::Lambda {
                 args: Box::from(Parameters {
@@ -938,16 +1095,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                     defaults: vec![],
                     kw_defaults: vec![],
                 }),
-                body: Box::from(to_located(ExpressionType::Subscript {
-                    a: Box::from(to_located(ExpressionType::List {
-                        elements: core_body,
-                    })),
-                    b: Box::from(to_located(ExpressionType::Number {
-                        value: Number::Integer {
-                            value: BigInt::from(-1),
-                        },
-                    })),
-                })),
+                body: Box::from(to_located(subscripted_list_return(core_body)))
             };
 
             let launch_lambda = ExpressionType::Lambda {
@@ -1007,8 +1155,15 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                 })),
             };
 
-            let mut call_operations = vec![to_located(call_lambda)];
+            let mut call_operations = vec![];
 
+            // Me must explicitely update the state with the current scope target
+            call_operations.push(to_located(update_state(ExpressionType::None, local_level)));
+
+            // We then call the recursive lambda
+            call_operations.push(to_located(call_lambda));
+
+            // Finally, we extract the state from the temp value of the lambda
             call_operations.push(to_located(ExpressionType::NamedExpression {
                 left: Box::from(to_located(ExpressionType::Identifier {
                     name: STATE_NAME.to_string(),
@@ -1025,12 +1180,10 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                 })),
             }));
 
-            for (i, variant) in exports.iter().enumerate() {
-                call_operations.push(to_located(ExpressionType::NamedExpression {
-                    left: Box::from(to_located(ExpressionType::Identifier {
-                        name: variant.to_string(),
-                    })),
-                    right: Box::from(to_located(ExpressionType::Subscript {
+            for (i, variant) in exports.iter().enumerate() {   
+                call_operations.push(to_located(optional_update(
+                    variant.to_string(),
+                    ExpressionType::Subscript {
                         a: Box::from(to_located(ExpressionType::Identifier {
                             name: TEMP_NAME.to_string(),
                         })),
@@ -1039,15 +1192,15 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                                 value: BigInt::from(i + 1),
                             },
                         })),
-                    })),
-                }));
+                    }
+                )));
             }
 
             if let Some(orelse) = orelse {
                 call_operations.push(to_located(ExpressionType::List {
                     elements: orelse
                         .iter()
-                        .map(|lin| to_located(to_expression(&lin.node, level + 1)))
+                        .map(|lin| to_located(to_expression(&lin.node, local_level)))
                         .collect::<Vec<Located<ExpressionType>>>(),
                 }));
             };
@@ -1144,8 +1297,8 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
             })),
         },
         StatementType::Pass => update_state(ExpressionType::None, level),
-        StatementType::Continue => update_state(ExpressionType::None, level),
-        StatementType::Break => update_state(ExpressionType::None, level - 1),
+        StatementType::Continue => update_state(ExpressionType::None, level - 2),
+        StatementType::Break => update_state(ExpressionType::None, level - 4),
         StatementType::Return { value } => match value {
             Some(value) => update_state(clone_expression(&value.node), 0),
             None => update_state(ExpressionType::None, 0),
@@ -1337,6 +1490,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
     }
 }
 
+/// Add an empty location to a node
 fn to_located<T>(node: T) -> Located<T> {
     Located {
         location: Location::new(0, 0),
@@ -1344,14 +1498,17 @@ fn to_located<T>(node: T) -> Located<T> {
     }
 }
 
+/// Clone an expression
 fn clone_expression(expression: &ExpressionType) -> ExpressionType {
     clone_expression_adapter(expression, &mut |located| located)
 }
 
+/// Clone parameters
 fn clone_parameters(args: &Parameters) -> Parameters {
     clone_parameters_adapter(args, &mut |located| located)
 }
 
+/// Clone an expression and apply a given function to each sub expression found
 fn clone_expression_adapter(
     expression: &ExpressionType,
     f: &mut impl FnMut(ExpressionType) -> ExpressionType,
@@ -1610,6 +1767,7 @@ fn clone_expression_adapter(
     f(local_expression)
 }
 
+/// Clone parameters and apply a given function to each sub expression found
 fn clone_parameters_adapter(
     args: &Parameters,
     f: &mut impl FnMut(ExpressionType) -> ExpressionType,
@@ -1682,346 +1840,713 @@ fn clone_parameters_adapter(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, Arc};
+
     use crate::python::{parse, serialize_inlined};
     use crate::transform::oneline::oneline;
+    use rustpython_vm as rvm;
+    use rvm::{extend_class, py_class};
+
+    /// Use interpreter to return the outputs of a given python source code
+    fn program_outputs(source: &str) -> String {
+        rvm::Interpreter::without_stdlib(Default::default()).enter(|vm| {
+            let scope = vm.new_scope_with_builtins();
+            let buffer: Arc<Mutex<String>> = Arc::new(Mutex::new("".to_string()));
+
+            let ctx = &vm.ctx;
+            let cls = rvm::PyRef::leak(py_class!(
+                ctx,
+                "Tstdout",
+                vm.ctx.types.object_type.to_owned(),
+                {}
+            ));
+            
+            let closure_buffer = buffer.clone();
+
+            let write_method = vm.new_method(   
+            "write",
+            cls,
+                move |_self: rvm::PyObjectRef, data: rvm::builtins::PyStrRef, _vm: &rvm::VirtualMachine| -> rvm::PyResult<()> {
+                    let mut buffer = closure_buffer.lock().unwrap();
+                    *buffer += data.as_str();
+                    Result::Ok(())
+                },
+            );
+
+            let flush_method = vm.new_method(
+                "flush", 
+                cls, 
+                |_self: rvm::PyObjectRef| {}
+            );
+
+            extend_class!(ctx, cls, {
+                "write" => write_method,
+                "flush" => flush_method,
+            });
+
+            let stdout = ctx.new_base_object(cls.to_owned(), None);
+            vm.sys_module.set_attr("stdout", stdout, vm).unwrap();
+            
+            match vm
+                .compile(source, rvm::compiler::Mode::Exec, "<embedded>".to_owned())
+                .map_err(|err| vm.new_syntax_error(&err, Some(source)))
+                .and_then(|code_obj| vm.run_code_obj(code_obj, scope.clone())) {
+                    Ok(_output) => {            
+                        buffer.lock().unwrap().to_string()
+                    },
+                    Err(err) => {
+                        vm.print_exception(err); 
+                        buffer.lock().unwrap().to_string()
+                    },
+                }               
+        })
+        
+    }
+
+    /// Assert that the oneliner python code have the same outputs as the base one
+    fn valid_output(source: &str) {
+        let serialized = serialize_inlined(oneline(parse(source)));
+        println!("{}", serialized);
+
+        let expected = program_outputs(source);
+        let oneliner = program_outputs(serialized.as_str());
+
+        assert_eq!(expected, oneliner, "Error: programs stdout are not matching:\n[base]: {expected}\n[oneliner]: {oneliner}\n\nThe oneliner source code is the following one:\n\n{serialized}")
+    }
 
     #[test]
     fn empty_program() {
-        let source = "";
-        let expect = "[__INL__STATE := (None, 1)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn variable_declaration() {
-        let source = "a = 1";
-        let expect = "[__INL__STATE := (None, 1), a := 1]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn variable_declaration_multi() {
-        let source = "a = 1\nb = a";
-        let expect = "[__INL__STATE := (None, 1), a := 1, b := a]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+b = a
+print(b)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn variable_bin_operation() {
-        let source = "a = 1\nb = a + 2";
-        let expect = "[__INL__STATE := (None, 1), a := 1, b := a + 2]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+b = a + 2
+print(b)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn function_call() {
-        let source = "a = 1\nb = a + 2\nc = a + b\nprint(c)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, b := a + 2, c := a + b, print(c)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+b = a + 2
+c = a + b
+print(c)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn type_list() {
-        let source = "a = [1, 2, 3]";
-        let expect = "[__INL__STATE := (None, 1), a := [1, 2, 3]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = [1, 2, 3]
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn type_tuple() {
-        let source = "a = (1, 2, 3)";
-        let expect = "[__INL__STATE := (None, 1), a := (1, 2, 3)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = (1, 2, 3)
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn type_set() {
-        let source = "a = { 1, 2, 3 }";
-        let expect = "[__INL__STATE := (None, 1), a := { 1, 2, 3 }]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = { 1, 2, 3 }
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn type_dict() {
-        let source = "a = { 'a': 1, 'b': 2, 'c': 3 }";
-        let expect = "[__INL__STATE := (None, 1), a := { 'a': 1, 'b': 2, 'c': 3 }]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = { 'a': 1, 'b': 2, 'c': 3 }
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn type_string() {
-        let source = "a = 'abc'";
-        let expect = "[__INL__STATE := (None, 1), a := 'abc']";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 'abc'
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn if_statement() {
-        let source = "if a:\n\tprint(1)";
-        let expect = "[__INL__STATE := (None, 1), [print(1)] if a else None, [] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+if True:
+    print(1)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn if_else_statement() {
-        let source = "if a:\n\tprint(1)\nelse:\n\tprint(2)";
-        let expect = "[__INL__STATE := (None, 1), [print(1)] if a else [print(2)], [] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+if False:
+    print(1)
+else:
+    print(2)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn list_comprehension() {
-        let source = "a = [i for i in range(10)]";
-        let expect = "[__INL__STATE := (None, 1), a := [i for i in range(10)]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = [i for i in range(10)]
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn lambda_function() {
-        let source = "a = (lambda x: x + 1)(1)";
-        let expect = "[__INL__STATE := (None, 1), a := (lambda x: x + 1)(1)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = (lambda x: x + 1)(1)
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn function_declaration() {
-        let source = "a = 1\ndef sprint(v):\n\tprint(v)\nsprint(a)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, sprint := (lambda v: [__INL__STATE := (None, 1), print(v), __INL__STATE[0]][-1]), sprint(a)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+def sprint(v):
+    print(v)
+sprint(a)
+"#;
+        valid_output(source);
+    }
+
+    #[test]
+    fn function_scoped_variable() {
+        let source = r#"
+a = 1
+
+def test():
+    a = 2
+
+print(a)
+test()
+print(a)
+"#;
+        valid_output(source);
+    }
+
+    #[test]
+    fn function_reference_variable() {
+        let source = r#"
+a = 1
+
+def test(a):
+    a = 2
+
+print(a)
+test(a)
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn function_declaration_decorated() {
-        let source = "a = 1\n@property\ndef sprint(v):\n\tprint(v)\nsprint(a)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, sprint := property((lambda v: [__INL__STATE := (None, 1), print(v), __INL__STATE[0]][-1])), sprint(a)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+@property
+def sprint(v):
+    print(v)
+sprint(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn function_declaration_recursive() {
-        let source =
-            "def fib(i):\n\tif i == 0:\n\t\treturn 1\n\telse:\n\t\treturn fib(i-1) + f(i-2)";
-        let expect = "[__INL__STATE := (None, 1), fib := (lambda i: [__INL__STATE := (None, 1), [__INL__STATE := (1, 0)] if i == 0 else [__INL__STATE := (fib(i - 1) + f(i - 2), 0)], [] if __INL__STATE[1] > 0 else None, __INL__STATE[0]][-1])]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source =r#"
+def fib(i):
+    if i <= 1:
+        return i
+    else:
+        return fib(i-1) + fib(i-2)
+print(fib(10))
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn function_declaration_parameter() {
-        let source = "a = 1\ndef sprint(v):\n\tprint(v)\nsprint(a)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, sprint := (lambda v: [__INL__STATE := (None, 1), print(v), __INL__STATE[0]][-1]), sprint(a)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+def sprint(v):
+    print(v)
+sprint(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn for_loop() {
-        let source = "for i in range(10):\n\tprint(i)";
-        let expect = "[__INL__STATE := (None, 1), [[__INL__i := i, print(__INL__i)] for i in range(10)], [] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+for i in range(10):
+    print(i)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn for_loop_else() {
-        let source = "for i in range(10):\n\tprint(i)\nelse:\n\tprint('none')";
-        let expect = "[__INL__STATE := (None, 1), [[[__INL__i := i, print(__INL__i)] for i in range(10)], [print('none')]], [] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+for i in range(10):
+    print(i)
+else:
+    print('none')
+"#;
+        valid_output(source);
+    }
+
+    #[test]
+    fn for_loop_return() {
+        let source = r#"
+def main():
+    for i in range(10):
+        if i == 2:
+            return
+        print(i)
+
+main()
+"#;
+        valid_output(source);
+
+    }
+    
+    #[test]
+    fn for_loop_break() {
+        let source = r#"
+for i in range(10):
+    if i == 2:
+        break
+    print(i)
+"#;
+        valid_output(source);
+    }
+    
+    #[test]
+    fn for_loop_continue() {
+        let source = r#"
+for i in range(10):
+    if i == 2:
+        continue
+    print(i)
+"#;
+        valid_output(source);
+    }
+
+    #[test]
+    fn for_loop_in_for_loop() {
+        let source = r#"
+for i in range(10):
+    for j in range(10):
+        print(i, j)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn while_loop() {
-        let source = "while True:\n\tprint('test')";
-        let expect = "[__INL__STATE := (None, 1), [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, print: __INL__CORE(__INL__CORE, __INL__STATE, print))((lambda __INL__CORE, __INL__STATE, print: [__INL__print := print, __INL__COND := True and __INL__STATE[1] > 1, [__INL__print('test'), __INL__CORE(__INL__CORE, __INL__STATE, __INL__print)][-1] if __INL__COND else (__INL__STATE, print)][-1]), __INL__STATE, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], print := __INL__TEMP[1]], [] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+i = 0
+while i < 5:
+    i += 1
+    print('test')
+"#;
+        valid_output(source);
     }
 
     #[test]
-    fn while_loop_args() {
-        let source = "a = 1\nwhile a < 5:\n\ta += 1\n\tprint(a)\nprint(a)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 5 and __INL__STATE[1] > 1, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2]], [print(a)] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+    fn while_loop_else() {
+        let source = r#"
+a = 1
+while a < 5:
+    a += 1
+    print(a)
+else:
+    print(a + 10)
+"#;
+        valid_output(source);
     }
 
     #[test]
-    fn while_loop_args_else() {
-        let source = "a = 1\nwhile a < 5:\n\ta += 1\n\tprint(a)\nelse:\n\tprint(a)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 5 and __INL__STATE[1] > 1, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2], [print(a)]], [] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+    fn while_loop_break() {
+        let source = r#"
+i = 0
+while i < 10:
+    if i == 2:
+        break
+    i += 1
+    print(i)
+"#;
+        valid_output(source);
     }
 
     #[test]
-    fn while_loop_flow_alteration() {
-        let source = "while True:\n\tif True:\n\t\tbreak";
-        let expect = "[__INL__STATE := (None, 1), [__INL__TEMP := (lambda __INL__CORE, __INL__STATE: __INL__CORE(__INL__CORE, __INL__STATE))((lambda __INL__CORE, __INL__STATE: [__INL__COND := True and __INL__STATE[1] > 1, [[__INL__STATE := (None, 2)] if True else None, [] if __INL__STATE[1] > 1 else None, __INL__CORE(__INL__CORE, __INL__STATE)][-1] if __INL__COND else (__INL__STATE, None)][-1]), __INL__STATE), __INL__STATE := __INL__TEMP[0]], [] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+    fn while_loop_continue() {
+        let source = r#"
+i = 0
+while i < 10:
+    i += 1
+    if i == 2:
+        continue
+    print(i)
+"#;
+        valid_output(source);
     }
+    #[test]
+    fn while_loop_pass() {
+        let source = r#"
+i = 0
+while i < 10:
+    if i == 2:
+        pass
+    i += 1
+    print(i)
+"#;
+        valid_output(source);
+    }
+
+    #[test]
+    fn while_loop_return() {
+        let source = r#"
+def main():
+    i = 0
+    while i < 10:
+        if i == 2:
+            return
+        i += 1
+        print(i)
+main()
+"#;
+        valid_output(source);
+    }
+
+    #[test]
+    fn while_loop_in_while_loop() {
+               let source = r#"
+i = 0
+while i < 10:
+    i += 1
+    j = 0
+    while j < 10:
+        j += 1
+        print(i, j)
+"#;
+        valid_output(source); 
+    }
+
+    #[test]
+    fn while_loop_in_for_loop() {
+               let source = r#"
+for i in range(10):
+    j = 0
+    while j < 10:
+        j += 1
+        print(i, j)
+"#;
+        valid_output(source); 
+    }
+
+    #[test]
+    fn for_loop_in_while_loop() {
+               let source = r#"
+i = 0
+while i < 10:
+    i += 1
+    for j in range(10):
+        print(i, j)
+"#;
+        valid_output(source); 
+    }
+
 
     #[test]
     fn class_declaration() {
-        let source = "class A():\n\tm = 'bar'\n\tdef foo(self):\n\t\treturn self.m";
-        let expect = "[__INL__STATE := (None, 1), A := type('A', (object,), { 'm': 'bar', 'foo': (lambda self: [__INL__STATE := (None, 1), __INL__STATE := (self.m, 0), __INL__STATE[0]][-1]) })]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+class A():
+    m = 'bar'
+    def foo(self):
+        return self.m
+a = A()
+print(a.foo())
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn remove_after_return() {
-        let source = "a = 1\nreturn\nb = 1";
-        let expect = "[__INL__STATE := (None, 1), a := 1, __INL__STATE := (None, 0)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+def main():
+    print(1)
+    return
+    print(2)
+
+main()
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn split_after_return() {
-        let source = "if a == 1:\n\treturn\nb = 1";
-        let expect = "[__INL__STATE := (None, 1), [__INL__STATE := (None, 0)] if a == 1 else None, [b := 1] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+def main():
+    print(1)
+    if True:
+        return
+    print(2)
+
+main()
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn function_return() {
-        let source = "def a():\n\tif True:\n\t\treturn 1\n\treturn 2\nprint(a())";
-        let expect = "[__INL__STATE := (None, 1), a := (lambda: [__INL__STATE := (None, 1), [__INL__STATE := (1, 0)] if True else None, [__INL__STATE := (2, 0)] if __INL__STATE[1] > 0 else None, __INL__STATE[0]][-1]), print(a())]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+def a():
+    if True:
+        return 1
+    return 2
+print(a())
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn optional_variable() {
-        let source = "a = 1\nb = 2\nwhile a < 5:\n\ta += 1\n\tb -= 1\nprint(a)\nprint(b)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, b := 2, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, b: __INL__CORE(__INL__CORE, __INL__STATE, a, b))((lambda __INL__CORE, __INL__STATE, a, b: [__INL__a := a, __INL__b := b, __INL__COND := __INL__a < 5 and __INL__STATE[1] > 1, [__INL__a := __INL__a + 1, __INL__b := __INL__b - 1, __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__b)][-1] if __INL__COND else (__INL__STATE, a, b)][-1]), __INL__STATE, a, b if 'b' in vars() else __builtins__.b if hasattr(__builtins__, 'b') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], b := __INL__TEMP[2]], [print(a), print(b)] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+b = 2
+while a < 5:
+    a += 1
+    b -= 1
+print(a)
+print(b)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn optional_function() {
-        let source = "a = 1\nwhile a < 5:\n\ta += 1\n\tprint(a)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 5 and __INL__STATE[1] > 1, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2]], [] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
-    }
-
-    #[test]
-    fn optional_function_returned() {
-        let source = "a = 1\nwhile a < 5:\n\ta += 1\n\tprint(a)\nprint(a)";
-        let expect = "[__INL__STATE := (None, 1), a := 1, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 5 and __INL__STATE[1] > 1, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2]], [print(a)] if __INL__STATE[1] > 0 else None]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+while a < 5:
+    a += 1
+    print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn optional_function_scoped() {
-        let source = "def main():\n\ta = 1\n\twhile a < 10:\n\t\ta += 1\n\t\tprint(a)\nmain()";
-        let expect = "[__INL__STATE := (None, 1), main := (lambda: [__INL__STATE := (None, 1), a := 1, [__INL__TEMP := (lambda __INL__CORE, __INL__STATE, a, print: __INL__CORE(__INL__CORE, __INL__STATE, a, print))((lambda __INL__CORE, __INL__STATE, a, print: [__INL__a := a, __INL__print := print, __INL__COND := __INL__a < 10 and __INL__STATE[1] > 1, [__INL__a := __INL__a + 1, __INL__print(__INL__a), __INL__CORE(__INL__CORE, __INL__STATE, __INL__a, __INL__print)][-1] if __INL__COND else (__INL__STATE, a, print)][-1]), __INL__STATE, a, print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None), __INL__STATE := __INL__TEMP[0], a := __INL__TEMP[1], print := __INL__TEMP[2]], [] if __INL__STATE[1] > 0 else None, __INL__STATE[0]][-1]), main()]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+def main():
+    a = 1
+    while a < 10:
+        a += 1
+        print(a)
+main()
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn import_statement() {
-        let source = "import math\nprint(math.pi)";
-        let expect =
-            "import math as __INL__IMPORT_math;[__INL__STATE := (None, 1), [math := __INL__IMPORT_math], print(math.pi)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+import math
+print(math.pi)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn global_statement() {
-        let source = "global a";
-        let expect =
-            "[__INL__STATE := (None, 1), a := globals()['a'], globals().update({ 'a': a })]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+def main():
+    global a
+    print(a)
+
+main()
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn global_statement_update() {
-        let source = "a = 1\ndef test():\n\tglobal a\n\ta = 2";
-        let expect =
-            "[__INL__STATE := (None, 1), a := 1, test := (lambda: [__INL__STATE := (None, 1), a := globals()['a'], a := 2, globals().update({ 'a': a }), __INL__STATE[0]][-1])]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
-    }
+        let source = r#"
+a = 1
+def main():
+    global a
+    a = 2
 
-    #[test]
-    fn assign_statement() {
-        let source = "a = 1";
-        let expect = "[__INL__STATE := (None, 1), a := 1]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+main()
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn assign_statement_attribute() {
-        let source = "a.attr = 1";
-        let expect = "[__INL__STATE := (None, 1), setattr(a, 'attr', 1)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+class A():
+    pass
+a = A()
+a.attr = 1
+print(a.attr)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn assign_statement_subscript() {
-        let source = "a[1] = 1";
-        let expect = "[__INL__STATE := (None, 1), a.__setitem__(1, 1)]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = [0, 1, 2]
+a[1] = 1
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn assign_statement_multi() {
-        let source = "a = b = 1";
-        let expect = "[__INL__STATE := (None, 1), [a := 1, b := 1]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = b = 1
+print(a)
+print(b)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn assign_statement_tuple() {
-        let source = "(a, b) = (1, 2)";
-        let expect = "[__INL__STATE := (None, 1), [__INL__SPLIT := (1, 2), a := __INL__SPLIT[0], b := __INL__SPLIT[1]]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+(a, b) = (1, 2)
+print(a)
+print(b)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn assign_statement_list() {
-        let source = "[a, b] = [1, 2]";
-        let expect = "[__INL__STATE := (None, 1), [__INL__SPLIT := [1, 2], a := __INL__SPLIT[0], b := __INL__SPLIT[1]]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+[a, b] = [1, 2]
+print(a)
+print(b)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn slice_array() {
-        let source = "s[:]";
-        let expect = "[__INL__STATE := (None, 1), s[:]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+s = [0,1,2,3]
+print(s[:])
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn raise_exception() {
-        let source = "raise";
-        let expect = "[__INL__STATE := (None, 1), (_ for _ in ()).throw(RuntimeError('No active exception to reraise'))]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+raise
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn raise_exception_message() {
-        let source = "raise Exception('error')";
-        let expect = "[__INL__STATE := (None, 1), (_ for _ in ()).throw(Exception('error')('No active exception to reraise'))]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+raise Exception('error')
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn try_except() {
-        let source = "try:\n\tprint('test')\nexcept:\n\tprint('error')";
-        let expect = "import sys as __INL__IMPORT_sys;[__INL__STATE := (None, 1), [sys := __INL__IMPORT_sys, __INL__EXCEPTHOOK := sys.excepthook, setattr(sys, 'excepthook', __INL__EXCEPTHOOK)]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+try:
+    print('test')
+except:
+    print('error')
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn del_variable() {
-        let source = "del a";
-        let expect = "import inspect as __INL__IMPORT_inspect;import ctypes as __INL__IMPORT_ctypes;[__INL__STATE := (None, 1), [[__INL__frame := __INL__IMPORT_inspect.currentframe(), [__INL__frame.f_locals.pop(__INL__name) for __INL__name in [__INL__name for (__INL__name, __INL__value) in __INL__frame.f_locals.items() if __INL__value is a]], __INL__IMPORT_ctypes.pythonapi.PyFrame_LocalsToFast(__INL__IMPORT_ctypes.py_object(__INL__frame), __INL__IMPORT_ctypes.c_int(1))]]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+a = 1
+del a
+print(a)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn del_item() {
-        let source = "del l[0]";
-        let expect = "[__INL__STATE := (None, 1), [l.__delitem__(0)]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+l = [0,1,2]
+del l[0]
+print(l)
+"#;
+        valid_output(source);
     }
 
     #[test]
     fn del_slice() {
-        let source = "del l[1:2]";
-        let expect = "[__INL__STATE := (None, 1), [l.__delitem__(slice(1, 2, None))]]";
-        assert_eq!(serialize_inlined(oneline(parse(source))), expect)
+        let source = r#"
+l = [0,1,2]
+del l[1:2]
+print(l)
+"#;
+        valid_output(source);
     }
+
+
 }
