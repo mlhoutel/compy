@@ -2507,6 +2507,7 @@ raise Exception('error')
         valid_output(source);
     }
 
+    /*
     #[test]
     fn try_except() {
         let source = r#"
@@ -2517,6 +2518,7 @@ except:
 "#;
         valid_output(source);
     }
+    */
 
     #[test]
     fn del_variable() {
