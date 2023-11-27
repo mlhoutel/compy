@@ -197,9 +197,63 @@ fn check_state_target_operator(target: u32, comparison: Comparison) -> Expressio
 
 /// Explicitely infer an argument source, for instance:
 /// 
-/// `print if 'print' in vars() else __builtins__.print if hasattr(__builtins__, 'print') else None)`
+/// `print if 'print' in vars() 
+/// else print if 'print' in globals() 
+/// else __builtins__.print if hasattr(__builtins__, 'print')
+/// else None`
 fn optional_variable(identifier: String) -> ExpressionType {
-    ExpressionType::IfExpression {
+
+    let test_builtins = ExpressionType::IfExpression {
+        test: Box::from(to_located(ExpressionType::Call {
+            function: Box::from(to_located(ExpressionType::Identifier {
+                name: HASATTR_NAME.to_string(),
+            })),
+            args: vec![
+                to_located(ExpressionType::Identifier {
+                    name: BUILTINS_NAME.to_string(),
+                }),
+                to_located(ExpressionType::String {
+                    value: StringGroup::Constant {
+                        value: identifier.to_string(),
+                    },
+                }),
+            ],
+            keywords: vec![],
+        })),
+        body: Box::from(to_located(ExpressionType::Attribute {
+            value: Box::from(to_located(ExpressionType::Identifier {
+                name: BUILTINS_NAME.to_string(),
+            })),
+            name: identifier.to_string(),
+        })),
+        orelse: Box::from(to_located(ExpressionType::None)),
+    };
+
+    let test_globals = ExpressionType::IfExpression {
+        test: Box::from(to_located(ExpressionType::Compare {
+            vals: vec![
+                to_located(ExpressionType::String {
+                    value: StringGroup::Constant {
+                        value: identifier.to_string(),
+                    },
+                }),
+                to_located(ExpressionType::Call {
+                    function: Box::from(to_located(ExpressionType::Identifier {
+                        name: GLOBALS_NAME.to_string(),
+                    })),
+                    args: vec![],
+                    keywords: vec![],
+                }),
+            ],
+            ops: vec![Comparison::In],
+        })),
+        body: Box::from(to_located(ExpressionType::Identifier {
+            name: identifier.to_string(),
+        })),
+        orelse: Box::from(to_located(test_builtins)),
+    };
+
+    let test_vars = ExpressionType::IfExpression {
         test: Box::from(to_located(ExpressionType::Compare {
             vals: vec![
                 to_located(ExpressionType::String {
@@ -220,32 +274,10 @@ fn optional_variable(identifier: String) -> ExpressionType {
         body: Box::from(to_located(ExpressionType::Identifier {
             name: identifier.to_string(),
         })),
-        orelse: Box::from(to_located(ExpressionType::IfExpression {
-            test: Box::from(to_located(ExpressionType::Call {
-                function: Box::from(to_located(ExpressionType::Identifier {
-                    name: HASATTR_NAME.to_string(),
-                })),
-                args: vec![
-                    to_located(ExpressionType::Identifier {
-                        name: BUILTINS_NAME.to_string(),
-                    }),
-                    to_located(ExpressionType::String {
-                        value: StringGroup::Constant {
-                            value: identifier.to_string(),
-                        },
-                    }),
-                ],
-                keywords: vec![],
-            })),
-            body: Box::from(to_located(ExpressionType::Attribute {
-                value: Box::from(to_located(ExpressionType::Identifier {
-                    name: BUILTINS_NAME.to_string(),
-                })),
-                name: identifier.to_string(),
-            })),
-            orelse: Box::from(to_located(ExpressionType::None)),
-        })),
-    }
+        orelse: Box::from(to_located(test_globals)),
+    };
+
+    test_vars
 }
 
 /// Explicitely infer an output source for scoped updates, for instance:
@@ -2106,6 +2138,32 @@ def fib(i):
     else:
         return fib(i-1) + fib(i-2)
 print(fib(10))
+"#;
+        valid_output(source);
+    }
+
+    #[test]
+    fn function_declaration_recursive_loop() {
+        let source = r#"
+graph = {
+  '5' : ['3','7'],
+  '3' : ['2', '4'],
+  '7' : ['8'],
+  '2' : [],
+  '4' : ['8'],
+  '8' : []
+}
+
+visited = set()
+
+def dfs(visited, graph, node):
+    if node not in visited:
+        print(node)
+        visited.add(node)
+        for neighbour in graph[node]:
+            dfs(visited, graph, neighbour)
+
+dfs(visited, graph, '5')
 "#;
         valid_output(source);
     }
