@@ -28,6 +28,7 @@ jobs:
           cd docs
           cargo install wasm-pack
           wasm-pack build --target web --out-dir static --out-name compy_wasm
+          rm static/.gitignore
 
       - name: Deploy to GitHub Pages
         uses: JamesIves/github-pages-deploy-action@4.1.5
