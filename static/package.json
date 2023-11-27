@@ -5,12 +5,12 @@
   ],
   "version": "0.1.0",
   "files": [
-    "compy_demo_bg.wasm",
-    "compy_demo.js",
-    "compy_demo.d.ts"
+    "compy_wasm_bg.wasm",
+    "compy_wasm.js",
+    "compy_wasm.d.ts"
   ],
-  "module": "compy_demo.js",
-  "types": "compy_demo.d.ts",
+  "module": "compy_wasm.js",
+  "types": "compy_wasm.d.ts",
   "sideEffects": [
     "./snippets/*"
   ]
