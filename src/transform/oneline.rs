@@ -9,15 +9,14 @@ use std::collections::{HashSet, VecDeque};
 
 use super::super::python::serialize_expression;
 
-const PREP_KEY: &str = "__INL__";
-const CORE_NAME: &str = "__INL__CORE";
-const TEMP_NAME: &str = "__INL__TEMP";
-const SPLIT_NAME: &str = "__INL__SPLIT";
-const STATE_NAME: &str = "__INL__STATE";
-const IMPORT_KEY: &str = "__INL__IMPORT_";
-const ITER_NAME: &str = "__INL__ITER";
-const ITER_CURSOR: &str = "__INL__ITCUR";
-const STOP_COND: &str = "__INL__STOP";
+const CORE_NAME: &str = "INL__CORE";
+const TEMP_NAME: &str = "INL__TEMP";
+const SPLIT_NAME: &str = "INL__SPLIT";
+const STATE_NAME: &str = "INL__STATE";
+const IMPORT_KEY: &str = "INL__IMPORT_";
+const ITER_NAME: &str = "INL__ITER";
+const ITER_CURSOR: &str = "INL__ITCUR";
+const STOP_COND: &str = "INL__STOP";
 const VARS_NAME: &str = "vars";
 const HASATTR_NAME: &str = "hasattr";
 const GLOBALS_NAME: &str = "globals";
@@ -36,7 +35,7 @@ const SETATTR_NAME: &str = "setattr";
 const DELATTR_NAME: &str = "delattr";
 const SETITEM_NAME: &str = "__setitem__";
 const DELITEM_NAME: &str = "__delitem__";
-const TEMP_EXCEPTHOOK: &str = "__INL__EXCEPTHOOK";
+const TEMP_EXCEPTHOOK: &str = "INL__EXCEPTHOOK";
 const EXCEPTION_DEF_TYPE: &str = "RuntimeError";
 const EXCEPTION_DEF_MSG: &str = "No active exception to reraise";
 
@@ -130,11 +129,6 @@ pub fn oneline(ast: Program) -> Program {
         })));
 
     return local;
-}
-
-/// Serialize variable name with compliant format
-fn to_internal(s: String) -> String {
-    format!("{}{}", PREP_KEY, s)
 }
 
 /// Reset the state with base values (None, 1) at the beggining of a new body
@@ -518,7 +512,8 @@ fn prepare_body(
         };
 
         // Add a check on the state after each for/while loop and if statements
-        if split_flow > 0 {
+        // if there still is some code after the branching
+        if split_flow > 0 && (i + 1) < body.len() {
             let flow_target = level + split_flow - 1; // to account for split_flow that start at 1
             
             let check_state = ExpressionType::IfExpression {
@@ -778,11 +773,17 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
             // while cur != "STOP":
             //      i = cur
             //      cur = next(it, "STOP") 
-
             // `it = iter(range(10))`
+
+
+            // We need to explicitly add the current indentation for the iterator and the cursor
+            // to avoid sharing it with lower loops when several for loops are nested.
+            let local_iter_name = ITER_NAME.to_string() + "__" + level.to_string().as_str();
+            let local_cursor_name = ITER_CURSOR.to_string() + "__" + level.to_string().as_str();
+
             let iter_assign = ExpressionType::NamedExpression { 
                 left: Box::from(to_located(ExpressionType::Identifier { 
-                    name: ITER_NAME.to_string() 
+                    name: local_iter_name.to_string()
                 })), 
                 right: Box::from(to_located(ExpressionType::Call { 
                     function: Box::from(to_located(ExpressionType::Identifier { 
@@ -796,7 +797,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
             // `cur = next(it, "STOP")`
             let cur_assign = ExpressionType::NamedExpression { 
                 left: Box::from(to_located(ExpressionType::Identifier { 
-                    name: ITER_CURSOR.to_string(),
+                    name: local_cursor_name.to_string(),
                 })), 
                 right: Box::from(to_located(ExpressionType::Call { 
                     function: Box::from(to_located(ExpressionType::Identifier {
@@ -804,7 +805,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                     })), 
                     args: vec![
                         to_located(ExpressionType::Identifier { 
-                            name: ITER_NAME.to_string() 
+                            name: local_iter_name.to_string()
                         }),
                         to_located(ExpressionType::String { value:
                             StringGroup::Constant { 
@@ -825,7 +826,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
             new_body.push(to_located(StatementType::Assign { 
                 targets: vec![to_located(clone_expression(&target.node))], 
                 value: to_located(ExpressionType::Identifier { 
-                    name: ITER_CURSOR.to_string(),
+                    name: local_cursor_name.to_string(),
                 }) 
             }));
             
@@ -833,7 +834,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
             new_body.push(to_located(StatementType::Assign { 
                 targets: vec![
                     to_located(ExpressionType::Identifier { 
-                        name: ITER_CURSOR.to_string(),
+                        name: local_cursor_name.to_string(),
                     }) 
                 ], 
                 value: to_located(ExpressionType::Call { 
@@ -842,7 +843,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                     })), 
                     args: vec![
                         to_located(ExpressionType::Identifier { 
-                            name: ITER_NAME.to_string() 
+                            name: local_iter_name.to_string() 
                         }),
                         to_located(ExpressionType::String { value:
                             StringGroup::Constant { 
@@ -872,7 +873,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
             let while_statement = StatementType::While { 
                 test: to_located(ExpressionType::Compare { 
                     vals: vec![
-                        to_located(ExpressionType::Identifier { name: ITER_CURSOR.to_string() }),
+                        to_located(ExpressionType::Identifier { name: local_cursor_name.to_string() }),
                         to_located(ExpressionType::String { value: StringGroup::Constant { value: STOP_COND.to_string() } })
                     ], 
                     ops: vec![Comparison::NotEqual] 
@@ -905,7 +906,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                     variants.insert(name.to_string());
 
                     return ExpressionType::Identifier {
-                        name: to_internal(name.to_string()),
+                        name: name.to_string()
                     };
                 };
 
@@ -977,7 +978,7 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                                 || variables.contains(&name.to_string())
                             {
                                 return ExpressionType::Identifier {
-                                    name: to_internal(name.to_string()),
+                                    name: name.to_string()
                                 };
                             }
                         };
@@ -999,17 +1000,6 @@ fn to_expression(statement: &StatementType, level: u32) -> ExpressionType {
                 Vec::from_iter(variables.clone()),
             ]
             .concat();
-
-            for variant in &exports {
-                core_body.push(to_located(ExpressionType::NamedExpression {
-                    left: Box::from(to_located(ExpressionType::Identifier {
-                        name: to_internal(variant.to_string()),
-                    })),
-                    right: Box::from(to_located(ExpressionType::Identifier {
-                        name: variant.to_string(),
-                    })),
-                }));
-            }
 
             // Prepare the values for the return startement
             // and local variables updates
@@ -2288,6 +2278,31 @@ while i < 10:
 "#;
         valid_output(source); 
     }
+
+    #[test]
+    fn while_loop_in_for_loop() {
+               let source = r#"
+for i in range(10):
+    j = 0
+    while j < 10:
+        j += 1
+        print(i, j)
+"#;
+        valid_output(source); 
+    }
+
+    #[test]
+    fn for_loop_in_while_loop() {
+               let source = r#"
+i = 0
+while i < 10:
+    i += 1
+    for j in range(10):
+        print(i, j)
+"#;
+        valid_output(source); 
+    }
+
 
     #[test]
     fn class_declaration() {
