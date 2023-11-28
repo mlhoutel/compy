@@ -1,7 +1,7 @@
 use rustpython_parser::{
     ast::{
         BooleanOperator, Comparison, ComprehensionKind, ConversionFlag, ExpressionType, Located,
-        Number, Operator, Program, StatementType, StringGroup, UnaryOperator, Varargs,
+        Number, Operator, Parameters, Program, StatementType, StringGroup, UnaryOperator, Varargs,
     },
     parser,
 };
@@ -26,6 +26,120 @@ pub fn serialize_inlined(ast: Program) -> String {
         .map(|statement| serialize_statement(&statement.node))
         .collect::<Vec<String>>()
         .concat()
+}
+
+pub fn serialize_parameters(args: &Box<Parameters>, annotated: bool) -> String {
+    let mut text_args = vec![];
+
+    let default_args = args
+        .defaults
+        .iter()
+        .map(|arg| serialize_expression(&arg.node))
+        .collect::<Vec<String>>();
+
+    let start_index_defaults = args.args.len() - default_args.len();
+
+    text_args.append(
+        &mut args
+            .args
+            .iter()
+            .map(|arg| {
+                if annotated {
+                    match &arg.annotation {
+                        Some(annotation) => {
+                            format!("{}: {}", arg.arg, serialize_expression(&annotation.node))
+                        }
+                        None => arg.arg.to_string(),
+                    }
+                } else {
+                    arg.arg.to_string()
+                }
+            })
+            .enumerate()
+            .map(|(i, arg)| {
+                if i >= start_index_defaults {
+                    format!("{} = {}", arg, default_args[i - start_index_defaults])
+                } else {
+                    arg
+                }
+            })
+            .collect::<Vec<String>>(),
+    );
+
+    match &args.vararg {
+        Varargs::Unnamed => text_args.push("*".to_string()),
+        Varargs::Named(param) => text_args.push(if annotated {
+            match &param.annotation {
+                Some(annotation) => {
+                    format!("*{}: {}", param.arg, serialize_expression(&annotation.node))
+                }
+                None => format!("*{}", param.arg.to_string()),
+            }
+        } else {
+            format!("*{}", param.arg.to_string())
+        }),
+        Varargs::None => (),
+    }
+
+    match &args.kwarg {
+        Varargs::Unnamed => text_args.push("**".to_string()),
+        Varargs::Named(param) => text_args.push(if annotated {
+            match &param.annotation {
+                Some(annotation) => {
+                    format!(
+                        "**{}: {}",
+                        param.arg,
+                        serialize_expression(&annotation.node)
+                    )
+                }
+                None => format!("**{}", param.arg.to_string()),
+            }
+        } else {
+            format!("**{}", param.arg.to_string())
+        }),
+        Varargs::None => (),
+    };
+
+    let default_kwargs = args
+        .kw_defaults
+        .iter()
+        .map(|arg| {
+            if let Some(arg) = arg {
+                Some(serialize_expression(&arg.node))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<Option<String>>>();
+
+    text_args.append(
+        &mut args
+            .kwonlyargs
+            .iter()
+            .map(|arg| {
+                if annotated {
+                    match &arg.annotation {
+                        Some(annotation) => {
+                            format!("{}: {}", arg.arg, serialize_expression(&annotation.node))
+                        }
+                        None => arg.arg.to_string(),
+                    }
+                } else {
+                    arg.arg.to_string()
+                }
+            })
+            .enumerate()
+            .map(|(i, arg)| {
+                if let Some(default) = &default_kwargs[i] {
+                    format!("{} = {}", arg, default)
+                } else {
+                    arg
+                }
+            })
+            .collect::<Vec<String>>(),
+    );
+
+    text_args.join(", ")
 }
 
 pub fn serialize_statement(statement: &StatementType) -> String {
@@ -388,99 +502,7 @@ pub fn serialize_statement(statement: &StatementType) -> String {
                 text += "async ";
             }
 
-            text += "def ";
-
-            let mut text_args = vec![];
-
-            let default_args = args
-                .defaults
-                .iter()
-                .map(|arg| serialize_expression(&arg.node))
-                .collect::<Vec<String>>();
-
-            let start_index_defaults = args.args.len() - default_args.len();
-
-            text_args.append(
-                &mut args
-                    .args
-                    .iter()
-                    .map(|arg| match &arg.annotation {
-                        Some(annotation) => {
-                            format!("{}: {}", arg.arg, serialize_expression(&annotation.node))
-                        }
-                        None => arg.arg.to_string(),
-                    })
-                    .enumerate()
-                    .map(|(i, arg)| {
-                        if i >= start_index_defaults {
-                            format!("{} = {}", arg, default_args[i - start_index_defaults])
-                        } else {
-                            arg
-                        }
-                    })
-                    .collect::<Vec<String>>(),
-            );
-
-            match &args.vararg {
-                Varargs::Unnamed => text_args.push("*".to_string()),
-                Varargs::Named(param) => text_args.push(match &param.annotation {
-                    Some(annotation) => {
-                        format!("*{}: {}", param.arg, serialize_expression(&annotation.node))
-                    }
-                    None => format!("*{}", param.arg.to_string()),
-                }),
-                Varargs::None => (),
-            }
-
-            match &args.kwarg {
-                Varargs::Unnamed => text_args.push("**".to_string()),
-                Varargs::Named(param) => text_args.push(match &param.annotation {
-                    Some(annotation) => {
-                        format!(
-                            "**{}: {}",
-                            param.arg,
-                            serialize_expression(&annotation.node)
-                        )
-                    }
-                    None => format!("**{}", param.arg.to_string()),
-                }),
-                Varargs::None => (),
-            };
-
-            let default_kwargs = args
-                .kw_defaults
-                .iter()
-                .map(|arg| {
-                    if let Some(arg) = arg {
-                        Some(serialize_expression(&arg.node))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<Option<String>>>();
-
-            text_args.append(
-                &mut args
-                    .kwonlyargs
-                    .iter()
-                    .map(|arg| match &arg.annotation {
-                        Some(annotation) => {
-                            format!("{}: {}", arg.arg, serialize_expression(&annotation.node))
-                        }
-                        None => arg.arg.to_string(),
-                    })
-                    .enumerate()
-                    .map(|(i, arg)| {
-                        if let Some(default) = &default_kwargs[i] {
-                            format!("{} = {}", arg, default)
-                        } else {
-                            arg
-                        }
-                    })
-                    .collect::<Vec<String>>(),
-            );
-
-            text += &format!("{}({})", &name, text_args.join(", "));
+            text += &format!("def {}({})", &name, serialize_parameters(args, true));
 
             match returns {
                 Some(returns) => {
@@ -765,7 +787,7 @@ pub fn serialize_expression(expression: &ExpressionType) -> String {
             );
         }
         ExpressionType::Comprehension { kind, generators } => {
-            let (before, after) = match kind.as_ref().clone() {
+            let (before, after) = match kind.as_ref() {
                 ComprehensionKind::GeneratorExpression { element } => {
                     (format!("({}", serialize_expression(&element.node)), ")")
                 }
@@ -934,23 +956,11 @@ pub fn serialize_expression(expression: &ExpressionType) -> String {
         }
         ExpressionType::Identifier { name } => text += name,
         ExpressionType::Lambda { args, body } => {
-            text += "(lambda";
-
-            if args.args.len() > 0 {
-                text = text
-                    + " "
-                    + &args
-                        .args
-                        .iter()
-                        .map(|arg| match &arg.annotation {
-                            Some(_) => panic!("lambda's syntax does not support annotation"),
-                            None => arg.arg.to_string(),
-                        })
-                        .collect::<Vec<String>>()
-                        .join(", ")
-            }
-
-            text += &format!(": {})", serialize_expression(&body.node))
+            text += &format!(
+                "(lambda {}: {})",
+                serialize_parameters(args, false),
+                serialize_expression(&body.node)
+            )
         }
         ExpressionType::IfExpression { test, body, orelse } => {
             text += &format!(
@@ -1253,13 +1263,19 @@ mod tests {
 
     #[test]
     fn lambda_no_params() {
-        let source = "(lambda: print(a))";
+        let source = "(lambda : print(a))";
         assert_eq!(serialize(parse(source)), source)
     }
 
     #[test]
     fn lambda_params() {
         let source = "(lambda a: print(a))";
+        assert_eq!(serialize(parse(source)), source)
+    }
+
+    #[test]
+    fn lambda_default() {
+        let source = "(lambda a = 1: print(a))";
         assert_eq!(serialize(parse(source)), source)
     }
 

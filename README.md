@@ -10,24 +10,27 @@ Here are some of the transformations that Compy can handle, along with their sta
 
 ### :construction: To One-liner
 
-| Feature                                       | Status                  |
-| --------------------------------------------- | ----------------------- |
-| Variables and data types                      | :white_check_mark: Done |
-| Control structures (if/else, for/while loops) | :white_check_mark: Done |
-| Functions and lambdas                         | :white_check_mark: Done |
-| Classes and objects                           | :white_check_mark: Done |
-| Annotations                                   | :white_check_mark: Done |
-| List, tuple, and dictionary manipulation      | :white_check_mark: Done |
-| Modules and packages                          | :white_check_mark: Done |
-| Decorators                                    | :white_check_mark: Done |
-| Built-in functions and modules                | :white_check_mark: Done |
-| Generators and iterators                      | :white_check_mark: Done |
-| Globals                                       | :white_check_mark: Done |
-| Delete                                        | :white_check_mark: Done |
-| Exception handling                            | :construction: In work  |
-| Context managers                              | :construction: In work  |
-| Async                                         | :x: Not supported yet   |
-| Type hints and static typing                  | :x: Not supported yet   |
+| Feature                                         | Status                  |
+| ----------------------------------------------- | ----------------------- |
+| Variables and data types                        | :white_check_mark: Done |
+| Control structures (if/else, for/while loops)   | :white_check_mark: Done |
+| Flow statements (return, break, continue, pass) | :white_check_mark: Done |
+| Functions and lambdas                           | :white_check_mark: Done |
+| Classes and objects                             | :white_check_mark: Done |
+| Annotations                                     | :white_check_mark: Done |
+| List, tuple, and dictionary manipulation        | :white_check_mark: Done |
+| Modules and packages                            | :white_check_mark: Done |
+| Decorators                                      | :white_check_mark: Done |
+| Built-in functions and modules                  | :white_check_mark: Done |
+| Generators and iterators                        | :white_check_mark: Done |
+| Globals                                         | :white_check_mark: Done |
+| Delete                                          | :white_check_mark: Done |
+| Exceptions                                      | :white_check_mark: Done |
+| Yield                                           | :x: Not supported       |
+| Exception handling                              | :x: Not supported       |
+| Context managers                                | :x: Not supported       |
+| Async / Await                                   | :x: Not supported       |
+| Type hints / Static typing                      | :x: Not supported       |
 
 ## Getting started
 
