@@ -10,8 +10,8 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.12/ace.js" defer></script>
     <script src="https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js"></script>
   </head>
-  <body style="background-color: #282a36; height: 100vh">
-    <div id="app" @vue:mounted="mounted" class="h-full flex-col p-5 font-mono text-white">
+  <body style="background-color: #282a36">
+    <div id="app" @vue:mounted="mounted" class="flex-col p-5 font-mono text-white">
       <div class="flex pb-5">
         <h1 class="text-2xl font-bold mx-auto">COMPY</h1>
         <a href="https://github.com/mlhoutel/compy">
@@ -19,7 +19,7 @@
         </a>
       </div>
 
-      <div class="flex-auto h-full sm:flex px-2 py-2" style="background-color: #383a47">
+      <div class="flex-grow h-full sm:flex px-2 py-2 sm:max-h-screen overflow-hidden" style="height: 1000px; background-color: #383a47">
         <div class="w-full overflow-hidden">
           <div class="flex content-between px-2 py-1 bg-sky-600 relative">
             <div>Input code</div>
@@ -39,8 +39,8 @@
 
         <div class="w-5 h-2"></div>
 
-        <div class="w-full flex-col overflow-hidden">
-          <div class="grow">
+        <div class="w-full h-full sm:flex flex-col overflow-hidden">
+          <div class="flex-grow overflow-hidden">
             <div class="flex content-between px-2 py-1 bg-sky-600 relative">
               <div>Output code</div>
 
@@ -57,11 +57,11 @@
 
           <div class="w-5 h-2"></div>
 
-          <div class="flex-1 h-full overflow-hidden">
-            <div class="flex content-between px-2 py-1 bg-sky-600 relative">
+          <div class="flex-initial max-h-96">
+            <div class="content-between px-2 py-1 bg-sky-600 relative">
               <div>Terminal</div>
             </div>
-            <div class="h-full w-full" style="background-color: #282a36">
+            <div class="h-full max-h-80 w-full" style="min-height: 300px; overflow-y: auto; background-color: #282a36">
               <pre><code class="px-1 py-1 break-all whitespace-pre-wrap" v-text="terminal"></code></pre>
             </div>
           </div>
@@ -69,7 +69,7 @@
       </div>
 
       <div class="flex-none flex justify-center">
-        <div class="px-3 py-1">browse project sources at <a href="https://github.com/mlhoutel/compy" class="underline">https://github.com/mlhoutel/compy</a></div>
+        <div class="px-3 py-1 m-auto">browse project sources at <a href="https://github.com/mlhoutel/compy" class="underline">https://github.com/mlhoutel/compy</a></div>
       </div>
     </div>
 
@@ -153,7 +153,7 @@
             }
 
             try {
-              this.python.runPython(`import sys\nprint(sys.version)`);
+              this.python.runPython(`import sys\nsys.setrecursionlimit(100000)\nprint(sys.version)`);
               this.python.runPython(this.outputSnippet.getValue());
             } catch (e) {
               this.terminal += `ERROR: ${e}\n`;
